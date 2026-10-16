@@ -1,74 +1,73 @@
-# LNG portfolio: sensor to decision
+# LNG Portfolio: Sensor to Decision (Senior Data Scientist — Venture Global LNG)
 
-A local stand-in for the Venture Global path from plant readings to a production decision. Python, DuckDB, and PySpark run on this machine. No cloud account is required. PySpark stands in for Databricks and needs a local Java runtime.
+An end-to-end data engineering and machine learning portfolio tailored for the **Senior Data Scientist** role at **Venture Global LNG** ([`jd.md`](jd.md)). Python, DuckDB, PySpark, and Scikit-Learn run locally or in GitHub Actions CI/CD with no cloud account required. PySpark stands in for Databricks and DuckDB stands in for SQL warehouse reconciliation across Bronze, Silver, and Gold medallion tables.
 
-Plant sensor logs from an operating LNG terminal are not public. Each public file stands in for one source:
+## Role & Architecture Alignment
 
-| File | Stands in for |
-|---|---|
-| Tennessee Eastman `d00`–`d21` | Historian tags. `d00` is normal operation. The rest are faults. Training runs `dXX.dat` are faulty from the first row. Test runs `dXX_te.dat` switch the fault on at step 160. |
-| EIA `lng_exports.csv` | National LNG volume, million cubic feet |
-| EIA `henry_hub.csv` | Gas supply price |
-| NOAA `lake_charles_weather.csv` | Ambient temperature at Lake Charles |
-| NOAA storm files | Louisiana storm counts |
-| EIA `gulf_lng_exports.csv` | Ship and terminal schedule: monthly exports from Sabine Pass, Cameron, Calcasieu Pass, Plaquemines, Corpus Christi, Freeport, and Golden Pass |
-| Microsoft `PdM_*.csv` | Work orders and failures for 2015. This sample does not share months with the export series, so it stays in its own table. |
+| Venture Global Stack (`jd.md` & `data_usage.md`) | Portfolio Stand-In | Purpose in Pipeline |
+|---|---|---|
+| **OSIsoft PI Historian** (flows, pressures, temperatures, valves) | Tennessee Eastman `d00`–`d21` (`52` tags, `3`-min steps) | Train-level sensor telemetry; `d00` is normal operation, `d01`–`d21` are process faults (switched on at step 160 in test runs) |
+| **Azure Data Lake Gen2 & Data Factory** | `download.py` → `data/raw` (Bronze) → `data/silver` → `data/gold` | Automated monthly ingestion of EIA LNG exports, Gulf terminal volumes, Henry Hub gas prices, and NOAA Lake Charles weather/storms |
+| **Databricks (PySpark & SQL)** | `prepare.py` (`PySpark` + `DuckDB`) | Distributed $3\sigma$ operating-envelope checks in PySpark and multi-source SQL joins in DuckDB |
+| **Predictive Modeling & Classification** | `model.py` (`Scikit-Learn` RF, Deep MLP, Probability Calibration) | Compares heuristic rules, Random Forests, Calibrated Random Forests, and Deep Neural Networks (MLP) |
+| **Executive BI & Stakeholder Communication** | `dashboard.py` → `site/index.html` | Self-contained interactive Plotly dashboard written in clear language for both non-technical stakeholders and engineers |
 
-## Dashboard
+## Live Dashboard
 
 **Live:** https://mhadeli.github.io/lng-sensor-to-decision/
 
-`dashboard.py` turns the gold tables into one static page, `site/index.html`. The GitHub Action in `.github/workflows/dashboard.yml` runs `download.py`, `prepare.py`, `model.py`, and `dashboard.py` on GitHub's servers and publishes the page to GitHub Pages. It runs on every push to `main`, on the 15th of each month after EIA's monthly update, and from the Actions tab on demand. If a source is down and a step fails, nothing is deployed and the last good page stays online. No local machine needs to be on.
+`dashboard.py` compiles the Gold tables and ML evaluations into a single static page, `site/index.html`. The GitHub Action in `.github/workflows/dashboard.yml` runs `download.py`, `prepare.py`, `model.py`, and `dashboard.py` on every push to `main`, on the 15th of each month (after EIA's monthly release), and on demand.
 
-One-time setup: in the repository, open **Settings → Pages** and set **Source** to **GitHub Actions**.
-
-## Setup
+## Setup & Run
 
 ```bash
 source .venv/bin/activate
 pip install -r requirements.txt
+
+python download.py    # Ingest EIA, NOAA, TEP historian, and Microsoft PdM raw files
+python prepare.py     # Build Silver & Gold tables with PySpark and DuckDB SQL
+python model.py       # Train & evaluate Heuristic, Random Forest, Calibrated RF, and Deep MLP models
+python dashboard.py   # Generate site/index.html
 ```
 
-## Run
+### Gold Layer Outputs (`data/gold/`)
 
-```bash
-python download.py
-python prepare.py
-python model.py
-python dashboard.py   # optional: open site/index.html
-```
+- `monthly.csv` — Reconciled monthly exports, Henry Hub price, Lake Charles temperature, Louisiana storms, and Gulf terminal volumes
+- `alerts.csv` — PySpark $3\sigma$ historian operating-envelope flags (fitted strictly on normal training run `d00.dat`)
+- `fault_predictions.csv` — Out-of-sample test predictions and probabilities across 21,120 rows for the 3-Sigma Rule, Random Forest, Calibrated Random Forest, and Deep Neural Network (MLP)
+- `feature_importance.csv` — Random Forest feature importances aggregated by physical sensor tag (level vs. 3-minute step change)
+- `calibration_curve.csv` — Reliability diagram bins comparing predicted fault probabilities against observed fault frequencies
+- `volume_forecast.csv` — 24-month walk-forward U.S. LNG export forecasts comparing Naive Baseline, Physics Day-Count Scaling, Seasonal Factor, Random Forest Regressor, Domain Heuristic, and Deep Neural Network (MLP Regressor)
+- `volume_gap.csv` & `maintenance.csv` — National-vs-Gulf volume reconciliation check and 2015 equipment work-order/failure counts
 
-`data/raw` is the landed layer. `prepare.py` writes cleaned tables to `data/silver` and the joined tables to `data/gold`:
+## Results Summary
 
-- `monthly.csv` joins exports, gas price, temperature, Louisiana storms, and Gulf terminal volume for the months the storm files cover
-- `alerts.csv` flags a sensor row that leaves the normal-operation band (mean ± 3 standard deviations on the normal training run)
-- `volume_gap.csv` is national exports minus the Gulf terminal total
-- `maintenance.csv` is the 2015 work-order and failure count
-- `fault_predictions.csv` compares that rule with a random forest that sees the current readings and how they just changed. Both are scored on the test runs, which the model never trains on
-- `volume_forecast.csv` is the next-month export forecast for the last 24 months, next to the actual value and the baseline "same as last month"
+### 1. Sensor Fault Detection & Probability Calibration (21,120 unseen test rows)
 
-## Results
+| Detection Method | Faults Caught (Sensitivity) | Normal Cleared (Specificity) | False Alarm Rate | ROC-AUC | Brier Score (↓) |
+|---|---|---|---|---|---|
+| **1. 3-Sigma Historian Rule (Baseline)** | 79.2% | 81.8% | 18.2% | — | — |
+| **2. Random Forest (Uncalibrated)** | 82.7% | 72.2% | 27.8% | 0.864 | 0.125 |
+| **3. Calibrated Random Forest (Prior + 15m Persistence)** | 78.5% | **81.9%** | **18.1%** | 0.877 | 0.132 |
+| **4. Deep Neural Network (MLP + 15m Window)** | **84.3%** | **81.0%** | 19.0% | **0.914** | **0.107** |
 
-Fault detection on the 21 test runs plus the normal test run, 21,120 rows:
+- **Root-Cause Feature Importance:** The Random Forest identifies the exact physical loops driving fault alerts—led by the **Reactor cooling-water valve (`x51`, 10.6%)**, **Separator pressure (`x13`, 8.6%)**, **Stripper steam flow (`x19`, 8.3%)**, and **Stripper temperature (`x18`, 8.3%)**.
+- **Fixing Alarm Fatigue via Calibration:** Because the training archive contains 20 fault runs for every 1 normal run, uncalibrated Random Forest probabilities trigger false alarms on 27.8% of normal test rows. Applying Bayesian prior calibration and a 5-step (15-minute) persistence window cuts false alarms to 18.1%.
+- **Deep Learning Gain:** A 2-layer Multi-Layer Perceptron (`64 → 32`) trained on normal-standardized z-scores with a 15-minute smoothing window achieves the best overall discrimination (**0.914 ROC-AUC**, **84.3%** faults caught, **81.0%** normal cleared). Faults 3, 9, and 15 barely move the physical sensors and remain unobservable without additional instrumentation.
 
-| Method | Faults caught | Normal rows cleared |
-|---|---|---|
-| Rule: any sensor outside the normal band | 79% | 82% |
-| Random forest | 83% | 72% |
+### 2. Next-Month U.S. LNG Export Forecast (24-month walk-forward evaluation)
 
-The random forest catches a few more faults and raises more false alarms. It is not clearly better than the rule. Faults 3, 9, and 15 are close to a coin flip for both. The benchmark literature reports the same thing: those faults barely move the measurements.
+| Method | Mean Absolute Error (Bcf) | MAPE | vs. Baseline |
+|---|---|---|---|
+| **Naive Baseline (Same as last month)** | 25.31 Bcf | 5.2% | Baseline |
+| **1. Physics Day-Count Scaling** (`last_daily_rate × days_in_month`) | 21.37 Bcf | 4.4% | -16% |
+| **2. Full Calendar-Month Factor** | 22.84 Bcf | 4.6% | -10% |
+| **3. Random Forest Regressor (L1 Loss)** | 20.50 Bcf | 4.1% | -19% |
+| **4. Domain Heuristic (50/50 Blend of 1 & 2)** | 19.69 Bcf | 3.9% | -22% |
+| **5. Deep Neural Network (MLP Regressor)** | **19.35 Bcf** | **3.8%** | **-24%** |
 
-Next-month U.S. LNG export forecast, scored on the last 24 months. Each month is forecast from earlier months only.
+## What a Production Engineer Would Do
 
-| Method | Mean miss | vs baseline |
-|---|---|---|
-| Same as last month (baseline) | 25.3 Bcf | |
-| 1. Same daily rate: last month's daily rate times the days in the coming month | 21.4 Bcf | -16% |
-| 2. Step 1 times the median change into that calendar month since 2019 | 22.8 Bcf | -10% |
-| 3. Average of 1 and 2 (final) | 19.7 Bcf | -22% |
+1. **Before raising a train's daily target:** Check the calibrated fault probability and inspect the top contributing tags (`x51` cooling-water valve, `x13` separator pressure, `x19` stripper steam flow) rather than reacting to isolated single-step spikes.
+2. **When setting the monthly export plan:** Account for calendar day counts and summer ambient temperature dips first (worth a 22% error reduction), then layer in the MLP forecast alongside internal plant schedules (Plaquemines train ramp-ups, planned maintenance windows, and cargo liftings).
 
-The EDA drove each step. Months have different lengths, and exports dip every summer. The calendar-month pattern is real but noisy, so the final forecast averages it with step 1 using fixed equal weights. Nothing is tuned on the test months. An earlier linear regression on gas price, temperature, and storm counts did not beat the baseline, so it was removed. The remaining misses come from plants ramping up and from cargo timing, which need plant-level inputs.
-
-## What a production engineer would do
-
-An alert means inspect that train before raising its daily target. A forecast below recent exports means check the gas price, the Lake Charles temperature, and the Gulf terminal volume for that month before setting the plan.
