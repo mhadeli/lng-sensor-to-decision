@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
+from evaluation import operational_metrics
 from model import GOLD, add_changes, export_features, fault_metrics, predict_export
 
 
@@ -47,6 +48,14 @@ class EvaluationArtifacts(unittest.TestCase):
         self.assertEqual(result["exports"]["selected"], min(result["exports"]["validation_mae_bcf"],
             key=result["exports"]["validation_mae_bcf"].get))
         self.assertLess(result["exports"]["validation_last"], result["exports"]["test_first"])
+
+    def test_operational_artifacts_match_saved_predictions(self):
+        predictions = pd.read_csv(GOLD / "fault_predictions.csv")
+        report, events, runs = operational_metrics(predictions)
+        self.assertEqual(report, json.loads((GOLD / "fault_operations.json").read_text()))
+        saved = pd.read_csv(GOLD / "fault_events.csv")
+        pd.testing.assert_frame_equal(events, saved, check_dtype=False)
+        pd.testing.assert_frame_equal(runs, pd.read_csv(GOLD / "fault_run_alerts.csv"), check_dtype=False)
 
     def test_metrics_match_predictions(self):
         result = json.loads((GOLD / "evaluation.json").read_text())

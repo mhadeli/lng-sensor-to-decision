@@ -13,6 +13,8 @@ from sklearn.utils.class_weight import compute_sample_weight
 from threadpoolctl import threadpool_limits
 from xgboost import XGBClassifier, XGBRegressor
 
+from evaluation import write_operational_evaluation
+
 ROOT = Path(__file__).resolve().parent
 SILVER = ROOT / "data" / "silver"
 GOLD = ROOT / "data" / "gold"
@@ -133,6 +135,7 @@ def classify_faults():
             importance["tag_name"] = importance.sensor.map(TAG_NAMES)
             importance.sort_values("importance", ascending=False).to_csv(GOLD / "feature_importance.csv", index=False)
     result.to_csv(GOLD / "fault_predictions.csv", index=False)
+    write_operational_evaluation(result, GOLD)
     metrics = {kind: fault_metrics(result.is_fault, result[f"{kind}_predicted"],
                                   result[f"{kind}_score"] if kind != "baseline" else None)
                for kind in ["baseline", "mlp", "xgboost"]}
