@@ -1,73 +1,93 @@
-# LNG Portfolio: Sensor to Decision (Senior Data Scientist — Venture Global LNG)
+# LNG: from data to decisions
 
-An end-to-end data engineering and machine learning portfolio tailored for the **Senior Data Scientist** role at **Venture Global LNG** ([`jd.md`](jd.md)). Python, DuckDB, PySpark, and Scikit-Learn run locally or in GitHub Actions CI/CD with no cloud account required. PySpark stands in for Databricks and DuckDB stands in for SQL warehouse reconciliation across Bronze, Silver, and Gold medallion tables.
+A data science portfolio built around two operational questions: **which process readings deserve investigation, and how accurately can next month’s LNG exports be forecast?** The dashboard explains the results for an operations audience, with technical details available on demand.
 
-## Role & Architecture Alignment
+This project supports my application for a senior data scientist role. [jd.md](jd.md) describes the role; [data_usage.md](data_usage.md) records the original research and proposed plant architecture. The implementation uses public stand-ins, not company operating data.
 
-| Venture Global Stack (`jd.md` & `data_usage.md`) | Portfolio Stand-In | Purpose in Pipeline |
-|---|---|---|
-| **OSIsoft PI Historian** (flows, pressures, temperatures, valves) | Tennessee Eastman `d00`–`d21` (`52` tags, `3`-min steps) | Train-level sensor telemetry; `d00` is normal operation, `d01`–`d21` are process faults (switched on at step 160 in test runs) |
-| **Azure Data Lake Gen2 & Data Factory** | `download.py` → `data/raw` (Bronze) → `data/silver` → `data/gold` | Automated monthly ingestion of EIA LNG exports, Gulf terminal volumes, Henry Hub gas prices, and NOAA Lake Charles weather/storms |
-| **Databricks (PySpark & SQL)** | `prepare.py` (`PySpark` + `DuckDB`) | Distributed $3\sigma$ operating-envelope checks in PySpark and multi-source SQL joins in DuckDB |
-| **Predictive Modeling & Classification** | `model.py` (`Scikit-Learn` RF, Deep MLP, Probability Calibration) | Compares heuristic rules, Random Forests, Calibrated Random Forests, and Deep Neural Networks (MLP) |
-| **Executive BI & Stakeholder Communication** | `dashboard.py` → `site/index.html` | Self-contained interactive Plotly dashboard written in clear language for both non-technical stakeholders and engineers |
+## View and run
 
-## Live Dashboard
-
-**Live:** https://mhadeli.github.io/lng-sensor-to-decision/
-
-`dashboard.py` compiles the Gold tables and ML evaluations into a single static page, `site/index.html`. The GitHub Action in `.github/workflows/dashboard.yml` runs `download.py`, `prepare.py`, `model.py`, and `dashboard.py` on every push to `main`, on the 15th of each month (after EIA's monthly release), and on demand.
-
-## Setup & Run
+Generate and open `site/index.html`. The page bundles Plotly locally and works without a CDN. The existing GitHub Pages destination is https://mhadeli.github.io/lng-sensor-to-decision/; local changes appear there only after deployment.
 
 ```bash
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-
-python download.py    # Ingest EIA, NOAA, TEP historian, and Microsoft PdM raw files
-python prepare.py     # Build Silver & Gold tables with PySpark and DuckDB SQL
-python model.py       # Train & evaluate Heuristic, Random Forest, Calibrated RF, and Deep MLP models
-python dashboard.py   # Generate site/index.html
+python download.py       # Tennessee Eastman simulation + monthly EIA LNG exports
+python prepare.py        # Validate inputs, build model-ready tables with pandas / SQL
+python model.py          # Validate settings, refit, evaluate baseline / MLP / XGBoost
+python -m unittest discover -s tests -v
+python dashboard.py      # Generate site/index.html + plotly.min.js
 ```
 
-### Gold Layer Outputs (`data/gold/`)
+On macOS, XGBoost needs the OpenMP runtime (`brew install libomp` if Homebrew is available). This workspace’s XGBoost library has been linked to the OpenMP runtime already bundled with scikit-learn; reinstalling XGBoost may require restoring that runtime linkage or installing libomp.
 
-- `monthly.csv` — Reconciled monthly exports, Henry Hub price, Lake Charles temperature, Louisiana storms, and Gulf terminal volumes
-- `alerts.csv` — PySpark $3\sigma$ historian operating-envelope flags (fitted strictly on normal training run `d00.dat`)
-- `fault_predictions.csv` — Out-of-sample test predictions and probabilities across 21,120 rows for the 3-Sigma Rule, Random Forest, Calibrated Random Forest, and Deep Neural Network (MLP)
-- `feature_importance.csv` — Random Forest feature importances aggregated by physical sensor tag (level vs. 3-minute step change)
-- `calibration_curve.csv` — Reliability diagram bins comparing predicted fault probabilities against observed fault frequencies
-- `volume_forecast.csv` — 24-month walk-forward U.S. LNG export forecasts comparing Naive Baseline, Physics Day-Count Scaling, Seasonal Factor, Random Forest Regressor, Domain Heuristic, and Deep Neural Network (MLP Regressor)
-- `volume_gap.csv` & `maintenance.csv` — National-vs-Gulf volume reconciliation check and 2015 equipment work-order/failure counts
+Downloads use cached raw files by default. `python download.py --refresh` refreshes EIA exports and regenerates its CSV. GitHub Actions runs this core workflow on pushes to `main`, monthly, or on demand; a failing build prevents deployment.
 
-## Results Summary
+## A smaller workflow
 
-### 1. Sensor Fault Detection & Probability Calibration (21,120 unseen test rows)
+```text
+Public source files → validated tables → causal features → three approaches
+                                            ↓
+                              validation chooses settings
+                                            ↓
+                       separate test evaluation → dashboard
+```
 
-| Detection Method | Faults Caught (Sensitivity) | Normal Cleared (Specificity) | False Alarm Rate | ROC-AUC | Brier Score (↓) |
-|---|---|---|---|---|---|
-| **1. 3-Sigma Historian Rule (Baseline)** | 79.2% | 81.8% | 18.2% | — | — |
-| **2. Random Forest (Uncalibrated)** | 82.7% | 72.2% | 27.8% | 0.864 | 0.125 |
-| **3. Calibrated Random Forest (Prior + 15m Persistence)** | 78.5% | **81.9%** | **18.1%** | 0.877 | 0.132 |
-| **4. Deep Neural Network (MLP + 15m Window)** | **84.3%** | **81.0%** | 19.0% | **0.914** | **0.107** |
-
-- **Root-Cause Feature Importance:** The Random Forest identifies the exact physical loops driving fault alerts—led by the **Reactor cooling-water valve (`x51`, 10.6%)**, **Separator pressure (`x13`, 8.6%)**, **Stripper steam flow (`x19`, 8.3%)**, and **Stripper temperature (`x18`, 8.3%)**.
-- **Fixing Alarm Fatigue via Calibration:** Because the training archive contains 20 fault runs for every 1 normal run, uncalibrated Random Forest probabilities trigger false alarms on 27.8% of normal test rows. Applying Bayesian prior calibration and a 5-step (15-minute) persistence window cuts false alarms to 18.1%.
-- **Deep Learning Gain:** A 2-layer Multi-Layer Perceptron (`64 → 32`) trained on normal-standardized z-scores with a 15-minute smoothing window achieves the best overall discrimination (**0.914 ROC-AUC**, **84.3%** faults caught, **81.0%** normal cleared). Faults 3, 9, and 15 barely move the physical sensors and remain unobservable without additional instrumentation.
-
-### 2. Next-Month U.S. LNG Export Forecast (24-month walk-forward evaluation)
-
-| Method | Mean Absolute Error (Bcf) | MAPE | vs. Baseline |
+| Question | Baseline | MLP | XGBoost |
 |---|---|---|---|
-| **Naive Baseline (Same as last month)** | 25.31 Bcf | 5.2% | Baseline |
-| **1. Physics Day-Count Scaling** (`last_daily_rate × days_in_month`) | 21.37 Bcf | 4.4% | -16% |
-| **2. Full Calendar-Month Factor** | 22.84 Bcf | 4.6% | -10% |
-| **3. Random Forest Regressor (L1 Loss)** | 20.50 Bcf | 4.1% | -19% |
-| **4. Domain Heuristic (50/50 Blend of 1 & 2)** | 19.69 Bcf | 3.9% | -22% |
-| **5. Deep Neural Network (MLP Regressor)** | **19.35 Bcf** | **3.8%** | **-24%** |
+| Detect abnormal sensor readings | Any sensor beyond its normal mean ± 3 standard deviations | Regularized 64 → 32 network | Shallow boosted trees |
+| Forecast monthly U.S. LNG exports | Last month’s daily export rate × next month’s days | Small regularized 8-unit network | Shallow boosted trees |
 
-## What a Production Engineer Would Do
+Removed the Random Forest variants, hand-set “calibration,” and competing forecast heuristics from the core comparison. Only the two necessary datasets run by default. The original supporting EDA sources remain available with `python download.py --extras` and `python prepare.py --extras`.
 
-1. **Before raising a train's daily target:** Check the calibrated fault probability and inspect the top contributing tags (`x51` cooling-water valve, `x13` separator pressure, `x19` stripper steam flow) rather than reacting to isolated single-step spikes.
-2. **When setting the monthly export plan:** Account for calendar day counts and summer ambient temperature dips first (worth a 22% error reduction), then layer in the MLP forecast alongside internal plant schedules (Plaquemines train ramp-ups, planned maintenance windows, and cargo liftings).
+Optional Spark demonstration: install `requirements-spark.txt` and Java, then run `python prepare.py --spark`. The default workflow needs no Java. The original `eda.ipynb` is an exploratory archive: its old model outputs are not the current evaluation; use `model.py` and the regenerated dashboard for results.
 
+## Evaluation design
+
+**Sensor detection.** Tennessee Eastman provides 52 process signals across normal operation and 21 fault scenarios. Training faults are active from the beginning; test faults activate at zero-based step 160. Features use current levels, one-step changes, and trailing five-reading means, resetting at run boundaries. Learned models scale features against normal training observations and include absolute deviation magnitudes. Class weights address the fault-heavy training mix. Scores use a causal five-reading average; this may delay detection and is not probability calibration.
+
+Within each training run, the first 75% supplies fitting data and the last 25% supplies validation, separated by a five-reading purge. Three regularization/depth settings and thresholds from 0.20 to 0.80 are compared by balanced accuracy. A normal reference is fitted separately inside each model fit. After selection, each model refits on the complete training archive. The selected approach and its threshold are fixed before scoring the separate test runs in each build.
+
+**Export forecasting.** The baseline adjusts for month length. Learned models predict the next change in daily rate from calendar seasonality, lagged growth, and historical seasonal changes. Each row’s seasonal feature uses only earlier years—training targets cannot contribute to their own feature. Models train on observations from 2019 onward. A 12-month walk-forward validation period precedes the final 24-month backtest; three settings per model are compared by mean absolute error. Settings and the headline approach are frozen before the test period. Models refit each month using only preceding observations.
+
+**Limits.** The benchmark test data has been examined during project development; it is not an untouched prospective trial. Sensor validation has only 125 normal readings from one normal run, and neighboring readings are correlated. Training and testing cover the same fault scenarios, so performance on novel faults is unknown. Scores and thresholds need recalibration on independent operating history. The forecast uses revised EIA data and assumes the prior month’s volume is available; release delays and historical data vintages are not reconstructed. Neither task demonstrates reduced downtime, safety risk, or operating cost at a real facility.
+
+## Current local results
+
+Snapshot from the current data rebuild (export holdout August 2024–July 2026). The dashboard always calculates its numbers from the newly generated artifacts.
+
+| Detection approach | Abnormal readings detected | Normal readings falsely flagged | Balanced accuracy | ROC-AUC |
+|---|---:|---:|---:|---:|
+| Baseline | 79.3% | 18.2% | 80.5% | — |
+| MLP — selected on validation | 61.2% | 0.2% | 80.5% | 0.904 |
+| XGBoost | 71.8% | 8.8% | 81.5% | 0.903 |
+
+The selected MLP greatly reduces false flags, **but misses more abnormal readings**. It does not beat the baseline on every criterion. XGBoost has the highest test balanced accuracy, but we do not switch the selected approach after seeing the test. This is a decision-support demonstration; operators would need to agree on an acceptable missed-event / false-alarm trade-off before deployment.
+
+| Forecast approach | Average absolute error | Average percentage error |
+|---|---:|---:|
+| Day-adjusted baseline | 21.37 Bcf | 4.58% |
+| MLP | 19.34 Bcf | 4.11% |
+| XGBoost — selected on validation | 19.53 Bcf | 4.28% |
+
+XGBoost reduces forecast error by **8.6%** against the day-adjusted baseline. MLP has the lowest test error, but XGBoost won the earlier validation period. A smaller model set and honest selection are more useful than presenting whichever test result happens to look best.
+
+## Outputs and checks
+
+`data/gold/` contains:
+
+- `fault_predictions.csv`: test labels, binary predictions, and uncalibrated model scores.
+- `feature_importance.csv`: XGBoost importance aggregated by sensor; not a causal explanation.
+- `volume_forecast.csv`: 24 months of actual volumes and the three forecasts, in million cubic feet.
+- `evaluation.json`: validation scores, selected settings / thresholds, test periods, and final metrics.
+- `alerts.csv`: baseline sensor flags from preparation.
+
+Old CSVs from earlier runs can remain in an existing data directory; the new dashboard reads only the current artifacts listed above. Raw data, generated outputs, and the local site are ignored by git; the source pipeline regenerates them.
+
+Tests check causal feature construction, run-boundary resets, missing-month rejection, validation-based model selection, and agreement between saved predictions and displayed metrics. The CI build runs these checks before generating and publishing the dashboard.
+
+## How this translates to plant work
+
+Start with operations: define the decision owner, actionable fault labels, forecast horizon, and acceptable alert burden. Connect historian readings to train status and maintenance events; connect forecasts to feed-gas constraints, availability, outages, and cargo schedules. Validate on later periods and separate trains, measure detection delay and incident-level outcomes, and run alongside existing processes before rollout.
+
+The local architecture demonstrates Python, SQL, feature engineering, model evaluation, reproducibility, and stakeholder communication. A proposed Azure implementation would use Data Factory ingestion, Data Lake storage, and Databricks preparation / scoring, with governed outputs and drift monitoring. Those integrations are proposed, not implemented here.

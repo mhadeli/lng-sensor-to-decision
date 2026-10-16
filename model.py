@@ -1,22 +1,23 @@
-"""Classify process faults (Rule vs Random Forest vs Calibrated RF vs Deep MLP) and forecast next month's LNG exports."""
-
+"""Three models per question; settings chosen before the final holdout is scored."""
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.calibration import calibration_curve
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.metrics import brier_score_loss, classification_report, recall_score, roc_auc_score
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.metrics import balanced_accuracy_score, recall_score, roc_auc_score
 from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.utils.class_weight import compute_sample_weight
+from threadpoolctl import threadpool_limits
+from xgboost import XGBClassifier, XGBRegressor
 
 ROOT = Path(__file__).resolve().parent
 SILVER = ROOT / "data" / "silver"
 GOLD = ROOT / "data" / "gold"
-# Several Gulf terminals were running by 2019. Earlier years are the start-up ramp.
-SEASON_START = "2019-01"
 TEST_MONTHS = 24
+VALID_MONTHS = 12
 
 TAGS = (
     [
@@ -40,227 +41,179 @@ TAGS = (
 TAG_NAMES = {f"x{i}": name for i, name in enumerate(TAGS, start=1)}
 
 
+
 def add_changes(sensors):
-    """Add each reading's change from the previous step and 5-step rolling mean of the same run."""
-    measures = [column for column in sensors.columns if column.startswith("x")]
-    change = sensors.groupby(["split", "fault_id"])[measures].diff().fillna(0)
-    change.columns = [f"d{column}" for column in measures]
-    roll_mean = sensors.groupby(["split", "fault_id"])[measures].transform(
-        lambda s: s.rolling(5, min_periods=1).mean()
-    )
-    roll_mean.columns = [f"m5_{column}" for column in measures]
-    basic_features = measures + list(change.columns)
-    temporal_features = basic_features + list(roll_mean.columns)
-    return pd.concat([sensors, change, roll_mean], axis=1), measures, basic_features, temporal_features
+    """Causal features; windows reset at each independent run."""
+    sensors = sensors.sort_values(["split", "fault_id", "step"]).reset_index(drop=True)
+    measures = [c for c in sensors if c.startswith("x")]
+    grouped = sensors.groupby(["split", "fault_id"])[measures]
+    changes = grouped.diff().fillna(0).add_prefix("d")
+    means = grouped.transform(lambda x: x.rolling(5, min_periods=1).mean()).add_prefix("m5_")
+    features = measures + list(changes) + list(means)
+    return pd.concat([sensors, changes, means], axis=1), measures, features
 
 
-def calibrate_probability(prob_series, fault_ids, prior_weight=0.72, window=5):
-    """Apply Bayesian prior adjustment and a 5-step (15-min) persistence window to raw fault probabilities."""
-    smoothed = prob_series.groupby(fault_ids).transform(lambda s: s.rolling(window, min_periods=1).mean()).clip(0, 1)
-    calibrated = (smoothed * prior_weight) / (smoothed * prior_weight + (1.0 - smoothed) + 1e-12)
-    return calibrated.clip(0, 1)
+def smooth(probabilities, frame):
+    return pd.Series(probabilities, index=frame.index).groupby(
+        [frame["split"], frame["fault_id"]]
+    ).transform(lambda x: x.rolling(5, min_periods=1).mean())
 
 
-def report(name, actual, predicted):
-    print(name)
-    print(classification_report(actual, predicted, target_names=["normal", "fault"], digits=3))
+class NormalReference(TransformerMixin, BaseEstimator):
+    """Express each signal relative to normal operation, including deviation magnitude."""
+    def fit(self, X, y):
+        self.scaler_ = StandardScaler().fit(X[np.asarray(y) == 0])
+        return self
+
+    def transform(self, X):
+        scaled = self.scaler_.transform(X)
+        return np.concatenate([scaled, np.abs(scaled)], axis=1)
+
+
+def fault_model(kind, setting):
+    if kind == "mlp":
+        return make_pipeline(NormalReference(), MLPClassifier(
+            hidden_layer_sizes=(64, 32), alpha=setting, max_iter=250,
+            random_state=42, tol=1e-4))
+    return make_pipeline(NormalReference(), XGBClassifier(n_estimators=220, max_depth=setting, learning_rate=0.04,
+                         min_child_weight=5, reg_lambda=10, subsample=0.85,
+                         colsample_bytree=0.85, tree_method="hist", n_jobs=2,
+                         random_state=42))
+
+
+def fit_fault(model, frame, features):
+    weights = compute_sample_weight("balanced", frame["is_fault"])
+    kwargs = {f"{model.steps[-1][0]}__sample_weight": weights}
+    model.fit(frame[features], frame["is_fault"], **kwargs)
+    return model
+
+
+def fault_metrics(actual, prediction, probability=None):
+    return {"caught": float(recall_score(actual, prediction)),
+            "false_alarm": float(1 - recall_score(actual, prediction, pos_label=0)),
+            "balanced_accuracy": float(balanced_accuracy_score(actual, prediction)),
+            "auc": float(roc_auc_score(actual, probability)) if probability is not None else None}
 
 
 def classify_faults():
-    """Train on the training runs. Score on the separate test runs, which the models never see."""
-    sensors, measures, basic_features, temporal_features = add_changes(pd.read_csv(SILVER / "sensors.csv"))
-    alerts = pd.read_csv(GOLD / "alerts.csv")
-    train = sensors[sensors["split"] == "train"]
-    test = sensors[sensors["split"] == "test"].copy()
-    y_train = train["is_fault"]
-    y_test = test["is_fault"]
-
-    # 1. Random Forest (balanced class weights for the 20:1 fault-to-normal training ratio)
-    rf = RandomForestClassifier(
-        n_estimators=200, max_depth=12, class_weight="balanced", random_state=0, n_jobs=-1
-    )
-    rf.fit(train[basic_features], y_train)
-    rf_prob = pd.Series(rf.predict_proba(test[basic_features])[:, 1], index=test.index)
-    rf_pred = (rf_prob >= 0.5).astype(int)
-
-    # 2. Probability-Calibrated Random Forest (Bayesian prior shift + 15-minute persistence filter)
-    rf_cal_prob = calibrate_probability(rf_prob, test["fault_id"], prior_weight=0.72, window=5)
-    rf_cal_pred = (rf_cal_prob >= 0.5).astype(int)
-
-    # 3. Deep Learning: Multi-Layer Perceptron (MLP) trained on normal-standardized z-scores + temporal window
-    normal_train = train[y_train == 0]
-    scaler = StandardScaler().fit(normal_train[basic_features])
-    X_train_scaled = scaler.transform(train[basic_features])
-    X_test_scaled = scaler.transform(test[basic_features])
-
-    idx_norm = np.where(y_train == 0)[0]
-    idx_fault = np.where(y_train == 1)[0]
-    rng = np.random.default_rng(0)
-    idx_bal = np.concatenate([rng.choice(idx_norm, size=len(idx_fault), replace=True), idx_fault])
-
-    mlp = MLPClassifier(
-        hidden_layer_sizes=(64, 32), activation="relu", alpha=8.0, max_iter=100, random_state=0
-    )
-    mlp.fit(X_train_scaled[idx_bal], y_train.iloc[idx_bal])
-    dl_raw_prob = pd.Series(mlp.predict_proba(X_test_scaled)[:, 1], index=test.index)
-    dl_prob = dl_raw_prob.groupby(test["fault_id"]).transform(lambda s: s.rolling(5, min_periods=1).mean()).clip(0, 1)
-    dl_pred = (dl_prob >= 0.5).astype(int)
-
-    # Save predictions and probabilities
-    result = test[["split", "fault_id", "step", "is_fault"]].copy()
-    result["model_predicted"] = rf_pred
-    result["rf_prob"] = rf_prob.round(4)
-    result["calibrated_predicted"] = rf_cal_pred
-    result["calibrated_prob"] = rf_cal_prob.round(4)
-    result["dl_predicted"] = dl_pred
-    result["dl_prob"] = dl_prob.round(4)
-    result = result.merge(alerts.drop(columns="is_fault"), on=["split", "fault_id", "step"])
-    result = result.rename(columns={"outside_limits": "rule_predicted"}).drop(columns="split")
+    sensors, measures, features = add_changes(pd.read_csv(SILVER / "sensors.csv"))
+    train = sensors[sensors.split == "train"].copy()
+    test = sensors[sensors.split == "test"].copy()
+    cutoff = train.groupby("fault_id")["step"].transform("max").add(1).mul(0.75).astype(int)
+    fit = train[train.step < cutoff - 5]
+    valid = train[train.step >= cutoff]
+    # A five-reading purge separates fitting and validation windows.
+    normal = train[train.is_fault == 0][measures]
+    baseline = ((test[measures] - normal.mean()).abs() > 3 * normal.std()).any(axis=1).astype(int)
+    normal_fit = fit[fit.is_fault == 0][measures]
+    baseline_valid = ((valid[measures] - normal_fit.mean()).abs() > 3 * normal_fit.std()).any(axis=1).astype(int)
+    result = test[["fault_id", "step", "is_fault"]].copy()
+    result["baseline_predicted"] = baseline
+    validation = {"baseline": fault_metrics(valid.is_fault, baseline_valid)}
+    selection = {}
+    for kind, settings in [("mlp", [1.0, 8.0, 30.0]), ("xgboost", [2, 4, 6])]:
+        candidates = []
+        for setting in settings:
+            model = fit_fault(fault_model(kind, setting), fit, features)
+            probability = smooth(model.predict_proba(valid[features])[:, 1], valid)
+            for threshold in np.arange(0.2, 0.81, 0.05):
+                metrics = fault_metrics(valid.is_fault, probability >= threshold, probability)
+                candidates.append((metrics["balanced_accuracy"], setting, float(threshold), metrics))
+        _, setting, threshold, metrics = max(candidates, key=lambda x: x[0])
+        validation[kind] = metrics
+        selection[kind] = {"setting": setting, "threshold": threshold}
+        model = fit_fault(fault_model(kind, setting), train, features)
+        probability = smooth(model.predict_proba(test[features])[:, 1], test)
+        result[f"{kind}_score"] = probability
+        result[f"{kind}_predicted"] = (probability >= threshold).astype(int)
+        if kind == "xgboost":
+            importance = pd.DataFrame({"sensor": [c.replace("m5_", "").removeprefix("d") for c in features * 2],
+                                       "importance": model.steps[-1][1].feature_importances_})
+            importance = importance.groupby("sensor", as_index=False).importance.sum()
+            importance["tag_name"] = importance.sensor.map(TAG_NAMES)
+            importance.sort_values("importance", ascending=False).to_csv(GOLD / "feature_importance.csv", index=False)
     result.to_csv(GOLD / "fault_predictions.csv", index=False)
+    metrics = {kind: fault_metrics(result.is_fault, result[f"{kind}_predicted"],
+                                  result[f"{kind}_score"] if kind != "baseline" else None)
+               for kind in ["baseline", "mlp", "xgboost"]}
+    selected = max(validation, key=lambda k: validation[k]["balanced_accuracy"])
+    return {"selected": selected, "settings": selection, "validation": validation, "test": metrics,
+            "test_rows": len(test), "train_rows": len(train), "fit_rows": len(fit), "validation_rows": len(valid)}
 
-    # Save Random Forest feature importances aggregated by physical sensor tag
-    imp_df = pd.DataFrame({
-        "feature": basic_features,
-        "sensor": [col.lstrip("d") for col in basic_features],
-        "kind": ["step_change" if col.startswith("dx") else "level" for col in basic_features],
-        "importance": rf.feature_importances_,
-    })
-    by_sensor = (
-        imp_df.pivot(index="sensor", columns="kind", values="importance")
-        .fillna(0.0)
-        .assign(total_importance=lambda d: d["level"] + d["step_change"])
-        .reset_index()
-    )
-    by_sensor["tag_name"] = by_sensor["sensor"].map(TAG_NAMES)
-    by_sensor["category"] = np.where(
-        by_sensor["sensor"].str.slice(1).astype(int) <= 22,
-        "Process measurement (XMEAS)",
-        np.where(by_sensor["sensor"].str.slice(1).astype(int) <= 41, "Composition analyzer", "Control valve (XMV)"),
-    )
-    by_sensor = by_sensor.sort_values("total_importance", ascending=False)
-    by_sensor[["sensor", "tag_name", "category", "level", "step_change", "total_importance"]].to_csv(
-        GOLD / "feature_importance.csv", index=False
-    )
 
-    # Save reliability / calibration curve data for dashboard
-    cal_rows = []
-    for name, col in [
-        ("Uncalibrated Random Forest", "rf_prob"),
-        ("Calibrated RF (Prior + 15m Persistence)", "calibrated_prob"),
-        ("Deep Neural Network (MLP)", "dl_prob"),
-    ]:
-        frac_pos, mean_pred = calibration_curve(result["is_fault"], result[col], n_bins=8, strategy="uniform")
-        for mp, fp in zip(mean_pred, frac_pos):
-            cal_rows.append({"model": name, "mean_predicted_prob": round(mp, 4), "observed_fault_rate": round(fp, 4)})
-    pd.DataFrame(cal_rows).to_csv(GOLD / "calibration_curve.csv", index=False)
+def export_features(exports):
+    exports = exports.sort_values("month").copy()
+    date = pd.to_datetime(exports.month)
+    if exports.month.duplicated().any() or not np.array_equal(date.dt.to_period("M").astype(str),
+            pd.period_range(date.min(), date.max(), freq="M").astype(str)):
+        raise ValueError("Exports must have one row per consecutive month")
+    days = date.dt.days_in_month
+    rate = exports.exports_mmcf / days
+    change = rate.pct_change()
+    exports["baseline"] = rate.shift(1) * days
+    exports["target"] = change
+    exports["sin_month"] = np.sin(2 * np.pi * date.dt.month / 12)
+    exports["cos_month"] = np.cos(2 * np.pi * date.dt.month / 12)
+    exports["last_change"] = change.shift(1)
+    exports["recent_change"] = change.shift(1).rolling(3).mean()
+    exports["year_change"] = rate.shift(1) / rate.shift(13) - 1
+    # Each row's seasonal estimate uses only earlier years, including during fitting.
+    exports["seasonal_change"] = change.groupby(date.dt.month).transform(
+        lambda x: x.shift(1).expanding(min_periods=2).median())
+    return exports, ["sin_month", "cos_month", "last_change", "recent_change", "year_change", "seasonal_change"]
 
-    print(f"fault test rows: {len(result):,}")
-    for label, pred_col, prob_col in [
-        ("rule: any sensor outside 3-sigma band", "rule_predicted", None),
-        ("random forest (uncalibrated)", "model_predicted", "rf_prob"),
-        ("calibrated random forest (prior + 15m persistence)", "calibrated_predicted", "calibrated_prob"),
-        ("deep neural network (MLP + 15m window)", "dl_predicted", "dl_prob"),
-    ]:
-        c1 = recall_score(result["is_fault"], result[pred_col])
-        c0 = recall_score(result["is_fault"], result[pred_col], pos_label=0)
-        extra = ""
-        if prob_col:
-            auc = roc_auc_score(result["is_fault"], result[prob_col])
-            brier = brier_score_loss(result["is_fault"], result[prob_col])
-            extra = f" | ROC-AUC: {auc:.3f} | Brier: {brier:.3f}"
-        print(f"  {label:52s} -> Faults caught: {c1:.1%}, Normal cleared: {c0:.1%}{extra}")
+
+def export_model(kind, setting):
+    if kind == "mlp":
+        return make_pipeline(StandardScaler(), MLPRegressor(hidden_layer_sizes=(8,),
+            solver="lbfgs", alpha=setting, max_iter=1000, random_state=42))
+    return XGBRegressor(n_estimators=setting, max_depth=2, learning_rate=0.025,
+        min_child_weight=6, reg_lambda=20, base_score=0.0, n_jobs=2, random_state=42)
+
+
+def predict_export(frame, features, i, kind, setting):
+    history = frame.iloc[:i].loc[lambda x: x.month >= "2019-01"].dropna(subset=features + ["target"])
+    model = export_model(kind, setting)
+    model.fit(history[features], history.target)
+    change = model.predict(frame.iloc[[i]][features])[0]
+    return max(0.0, float(frame.iloc[i].baseline * (1 + change)))
 
 
 def forecast_exports():
-    """Forecast next month's exports using walk-forward validation (strictly earlier months only).
-
-    Compares:
-    - same_as_last_month: naive baseline
-    - same_daily_rate: physics/calendar day-count scaling
-    - calendar_month: daily rate times historical median seasonal factor
-    - forecast: domain heuristic (50/50 blend of daily rate and seasonal factor)
-    - rf_forecast: Random Forest Regressor (L1 loss) on seasonal & temperature features
-    - dl_forecast: Deep Neural Network (MLP Regressor) on standardized seasonal, temperature & momentum features
-    """
-    exports = pd.read_csv(SILVER / "exports.csv")
-    weather = pd.read_csv(SILVER / "weather.csv")
-    exports = exports.merge(weather, on="month", how="left")
-    exports["date"] = pd.to_datetime(exports["month"])
-    exports["days"] = exports["date"].dt.days_in_month
-    exports["cal_month"] = exports["date"].dt.month
-    exports["daily_rate"] = exports["exports_mmcf"] / exports["days"]
-    exports["change"] = exports["daily_rate"] / exports["daily_rate"].shift(1)
-    exports["sin_m"] = np.sin(2 * np.pi * exports["cal_month"] / 12)
-    exports["cos_m"] = np.cos(2 * np.pi * exports["cal_month"] / 12)
-    exports["yoy_growth"] = (exports["daily_rate"].shift(1) / exports["daily_rate"].shift(13)).fillna(1.0)
-    exports["mom_lag1"] = exports["change"].shift(1).fillna(1.0)
-
-    rows = []
-    feat_cols = ["seasonal_prior", "sin_m", "cos_m", "expected_temp", "yoy_growth", "mom_lag1"]
-
-    for i in range(len(exports) - TEST_MONTHS, len(exports)):
-        month, last = exports.iloc[i], exports.iloc[i - 1]
-        history = exports.iloc[:i].copy()
-        history = history[history["month"] >= SEASON_START].dropna(subset=["change"]).copy()
-
-        med_by_month = history.groupby("cal_month")["change"].median().to_dict()
-        temp_by_month = history.groupby("cal_month")["temp_c"].mean().to_dict()
-        history["seasonal_prior"] = history["cal_month"].map(med_by_month)
-        history["expected_temp"] = history["cal_month"].map(temp_by_month)
-
-        typical_change = med_by_month[month["cal_month"]]
-        same_daily_rate = last["daily_rate"] * month["days"]
-        calendar_month = same_daily_rate * typical_change
-        heuristic = (same_daily_rate + calendar_month) / 2
-
-        x_te = pd.DataFrame([{
-            "seasonal_prior": typical_change,
-            "sin_m": month["sin_m"],
-            "cos_m": month["cos_m"],
-            "expected_temp": temp_by_month[month["cal_month"]],
-            "yoy_growth": month["yoy_growth"],
-            "mom_lag1": month["mom_lag1"],
-        }])
-
-        rf = RandomForestRegressor(
-            n_estimators=100, max_depth=3, min_samples_leaf=4, criterion="absolute_error", random_state=0
-        )
-        rf.fit(history[feat_cols], history["change"])
-        rf_change = rf.predict(x_te)[0]
-
-        mlp = make_pipeline(
-            StandardScaler(),
-            MLPRegressor(hidden_layer_sizes=(16, 8), solver="lbfgs", alpha=10.0, max_iter=200, random_state=0),
-        )
-        mlp.fit(history[feat_cols], history["change"])
-        dl_change = mlp.predict(x_te)[0]
-
-        rows.append(
-            {
-                "month": month["month"],
-                "actual": month["exports_mmcf"],
-                "same_as_last_month": last["exports_mmcf"],
-                "same_daily_rate": round(same_daily_rate),
-                "calendar_month": round(calendar_month),
-                "forecast": round(heuristic),
-                "rf_forecast": round(same_daily_rate * rf_change),
-                "dl_forecast": round(same_daily_rate * dl_change),
-            }
-        )
-    result = pd.DataFrame(rows)
+    frame, features = export_features(pd.read_csv(SILVER / "exports.csv"))
+    start = len(frame) - TEST_MONTHS
+    if start - VALID_MONTHS < 36:
+        raise ValueError("At least 72 monthly observations are required")
+    validation = {"baseline": float((frame.iloc[start-VALID_MONTHS:start].baseline -
+                                    frame.iloc[start-VALID_MONTHS:start].exports_mmcf).abs().mean() / 1000)}
+    settings = {}
+    for kind, candidates in [("mlp", [1.0, 10.0, 100.0]), ("xgboost", [40, 100, 200])]:
+        errors = {}
+        for setting in candidates:
+            predictions = [predict_export(frame, features, i, kind, setting) for i in range(start-VALID_MONTHS, start)]
+            errors[setting] = float(np.mean(np.abs(np.array(predictions) - frame.iloc[start-VALID_MONTHS:start].exports_mmcf)) / 1000)
+        settings[kind] = min(errors, key=errors.get)
+        validation[kind] = errors[settings[kind]]
+    selected = min(validation, key=validation.get)
+    result = frame.iloc[start:][["month", "exports_mmcf", "baseline"]].rename(columns={"exports_mmcf": "actual"}).copy()
+    for kind, setting in settings.items():
+        result[kind] = [predict_export(frame, features, i, kind, setting) for i in range(start, len(frame))]
     result.to_csv(GOLD / "volume_forecast.csv", index=False)
-
-    methods = ["same_as_last_month", "same_daily_rate", "calendar_month", "rf_forecast", "forecast", "dl_forecast"]
-    error = result[methods].sub(result["actual"], axis=0).abs().mean()
-    print(f"\nexport forecast, {TEST_MONTHS} months to {result['month'].iloc[-1]}, mean absolute error in Bcf:")
-    print((error / 1000).round(2).to_string())
+    metrics = {kind: {"mae_bcf": float((result[kind] - result.actual).abs().mean() / 1000),
+                      "mape": float(((result[kind] - result.actual).abs() / result.actual).mean())}
+               for kind in ["baseline", "mlp", "xgboost"]}
+    return {"selected": selected, "settings": settings, "validation_mae_bcf": validation, "test": metrics,
+            "validation_first": frame.iloc[start-VALID_MONTHS].month, "validation_last": frame.iloc[start-1].month,
+            "test_first": result.month.iloc[0], "test_last": result.month.iloc[-1], "test_months": len(result)}
 
 
 def main():
-    classify_faults()
-    forecast_exports()
+    GOLD.mkdir(parents=True, exist_ok=True)
+    with threadpool_limits(limits=2):
+        results = {"faults": classify_faults(), "exports": forecast_exports()}
+    (GOLD / "evaluation.json").write_text(json.dumps(results, indent=2) + "\n")
+    print(json.dumps(results, indent=2))
 
 
 if __name__ == "__main__":
     main()
-

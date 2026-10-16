@@ -1,5 +1,6 @@
 """Download the public stand-ins for the plant into data/raw."""
 
+import argparse
 import json
 import re
 import zipfile
@@ -41,18 +42,20 @@ GULF_SERIES = {
 }
 
 
-def download(url, path):
-    if path.exists() and path.stat().st_size > 0:
+def download(url, path, refresh=False):
+    if not refresh and path.exists() and path.stat().st_size > 0:
         print(f"already have {path.relative_to(ROOT)}")
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     print(f"downloading {path.name}")
     with requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, stream=True, timeout=300) as response:
         response.raise_for_status()
-        with path.open("wb") as handle:
+        temporary = path.with_suffix(path.suffix + ".part")
+        with temporary.open("wb") as handle:
             for chunk in response.iter_content(chunk_size=256 * 1024):
                 if chunk:
                     handle.write(chunk)
+        temporary.replace(path)
 
 
 def save_tep(zip_path):
@@ -71,8 +74,8 @@ def save_tep(zip_path):
     print(f"saved {len(list(out.glob('d*.dat')))} Tennessee Eastman files")
 
 
-def save_monthly_xls(xls_path, csv_path, header):
-    if csv_path.exists() and csv_path.stat().st_size > 0:
+def save_monthly_xls(xls_path, csv_path, header, refresh=False):
+    if not refresh and csv_path.exists() and csv_path.stat().st_size > 0:
         print(f"already have {csv_path.relative_to(ROOT)}")
         return
     book = xlrd.open_workbook(xls_path)
@@ -121,14 +124,20 @@ def latest_storm_files():
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--extras", action="store_true", help="Download the original supporting EDA sources")
+    parser.add_argument("--refresh", action="store_true", help="Refresh the monthly EIA export source")
+    args = parser.parse_args()
     RAW.mkdir(parents=True, exist_ok=True)
     tep_zip = RAW / "tep.zip"
     download(TEP_ZIP, tep_zip)
     save_tep(tep_zip)
 
     xls_path = RAW / "lng_exports.xls"
-    download(EIA_XLS, xls_path)
-    save_monthly_xls(xls_path, RAW / "lng_exports.csv", "month,exports_mmcf")
+    download(EIA_XLS, xls_path, refresh=args.refresh)
+    save_monthly_xls(xls_path, RAW / "lng_exports.csv", "month,exports_mmcf", refresh=args.refresh)
+    if not args.extras:
+        return
 
     price_path = RAW / "henry_hub.xls"
     download(HENRY_HUB_XLS, price_path)

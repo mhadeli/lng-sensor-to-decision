@@ -1,522 +1,123 @@
-"""Build a one-page dashboard from the pipeline outputs into site/index.html.
-
-The page follows the project's story: the problem, the questions, the data,
-the workflow and tools, then the results. Every number on the page is computed
-from data/gold, so the monthly rebuild keeps the text and the charts in step.
-"""
-
+"""Build a plain-language portfolio dashboard from evaluated model outputs."""
+import json
+from html import escape
 from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
-from sklearn.metrics import recall_score, roc_auc_score
+from plotly.offline import get_plotlyjs
 
 ROOT = Path(__file__).resolve().parent
-RAW = ROOT / "data" / "raw"
-SILVER = ROOT / "data" / "silver"
 GOLD = ROOT / "data" / "gold"
 SITE = ROOT / "site"
-
-BLUE = "#2a78d6"
-NAVY = "#163e73"
-TEAL = "#159a80"
-ORANGE = "#eb6834"
-GRAY = "#8a8984"
-LIGHT_GRAY = "#c9c8c2"
-INK = "#0b0b0b"
-VENTURE_GLOBAL = ["Calcasieu Pass", "Plaquemines"]
-MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-
-FORECAST_METHODS = {
-    "same_as_last_month": ("Same as last month (baseline)", "Next month equals last month"),
-    "same_daily_rate": ("Day-count scaling", "Last month's daily rate × days in the coming month"),
-    "calendar_month": ("Calendar-month factor", "Day-count rate × median change into that calendar month"),
-    "forecast": ("Day-count + seasonal blend", "Average of the two methods above"),
-    "rf_forecast": ("Random forest regressor", "Trees on seasonal, temperature and momentum features"),
-    "dl_forecast": ("Neural network (MLP regressor)", "Small regularized network on the same features"),
-}
-FAULT_METHODS = [
-    ("3-sigma rule (baseline)", "rule_predicted", None, "Alert if any of 52 tags leaves the normal mean ± 3 SD"),
-    ("Random forest", "model_predicted", "rf_prob", "200 trees on sensor levels and 3-minute changes"),
-    ("Calibrated random forest", "calibrated_predicted", "calibrated_prob",
-     "Probability adjusted for the 20:1 training mix, then averaged over 15 minutes"),
-    ("Neural network (MLP)", "dl_predicted", "dl_prob", "2-layer network on normal-scaled readings, averaged over 15 minutes"),
-]
+NAMES = {"baseline": "Simple baseline", "mlp": "Neural network (MLP)", "xgboost": "XGBoost"}
+COLORS = {"baseline": "#949c9c", "mlp": "#296abd", "xgboost": "#087f73"}
 
 
-def style(figure, title, y_title=None, x_title=None, percent=False, height=370):
-    figure.update_layout(
-        title=dict(text=title, x=0, font=dict(size=15, color=INK)),
-        template="plotly_white",
-        height=height,
-        margin=dict(l=12, r=16, t=52, b=16),
-        legend=dict(orientation="h", y=-0.18, x=0),
-        hovermode="x unified",
-        font=dict(family="system-ui, -apple-system, sans-serif", color="#4a4946"),
-    )
-    figure.update_yaxes(title=y_title, tickformat=".0%" if percent else ",")
-    if x_title:
-        figure.update_xaxes(title=x_title)
-    return figure
+def chart(fig, chart_id, ytitle):
+    fig.update_layout(template="plotly_white", height=340, margin=dict(l=45, r=20, t=20, b=50),
+                      font=dict(family="Arial, sans-serif", color="#405051", size=12),
+                      paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                      legend=dict(orientation="h", y=-0.22), hovermode="x unified")
+    fig.update_yaxes(title=ytitle, gridcolor="#e6eae6", zeroline=False)
+    return fig.to_html(full_html=False, include_plotlyjs=False, div_id=chart_id,
+                       config={"displayModeBar": False, "responsive": True})
 
 
-def chart(figure, first=False):
-    return figure.to_html(
-        full_html=False,
-        include_plotlyjs="cdn" if first else False,
-        config={"displayModeBar": False, "responsive": True},
-    )
-
-
-def table(frame):
-    return frame.to_html(index=False, border=0, escape=False)
-
-
-def export_results():
-    exports = pd.read_csv(SILVER / "exports.csv", parse_dates=["month"]).set_index("month")
-    gulf = pd.read_csv(RAW / "gulf_lng_exports.csv", parse_dates=["month"])
-    terminals = gulf.pivot_table(index="month", columns="terminal", values="exports_mmcf", aggfunc="sum")
-    volume = exports.join(terminals).fillna(0).loc["2016":] / 1000
-    venture_global = volume[VENTURE_GLOBAL].sum(axis=1)
-    other_gulf = volume[terminals.columns].sum(axis=1) - venture_global
-    rest = (volume["exports_mmcf"] - venture_global - other_gulf).clip(lower=0)
-
-    stack = go.Figure()
-    for name, values, color in [
-        ("Venture Global (Calcasieu Pass & Plaquemines)", venture_global, BLUE),
-        ("Other Gulf Coast terminals", other_gulf, GRAY),
-        ("Rest of U.S.", rest, LIGHT_GRAY),
-    ]:
-        stack.add_scatter(x=volume.index, y=values, name=name, stackgroup="one",
-                          line=dict(width=0.6, color=color), fillcolor=color)
-    style(stack, "U.S. LNG exports by source", "Bcf per month")
-
-    total = volume["exports_mmcf"]
-    ratio = (total / total.rolling(12, center=True).mean()).loc["2019":].dropna() - 1
-    seasonal = ratio.groupby(ratio.index.month).mean()
-    season = go.Figure(go.Bar(
-        x=MONTHS, y=seasonal, marker_color=[ORANGE if value < 0 else BLUE for value in seasonal],
-        hovertemplate="%{x}: %{y:+.1%} against the 12-month trend<extra></extra>",
-    ))
-    style(season, "Exports against their 12-month trend, by calendar month (2019 onward)",
-          "Difference from trend", percent=True, height=340)
-
-    last_year = volume.index >= volume.index.max() - pd.DateOffset(months=11)
-    return {
-        "stack": stack,
-        "season": season,
-        "share": venture_global[last_year].sum() / total[last_year].sum(),
-        "vg_bcf": venture_global[last_year].mean(),
-        "latest": volume.index.max(),
-        "summer": seasonal.loc[6:9].mean(),
-        "winter": seasonal.loc[[12, 1, 3]].mean(),
-    }
-
-
-def forecast_results():
-    forecast = pd.read_csv(GOLD / "volume_forecast.csv", parse_dates=["month"])
-    miss = forecast[list(FORECAST_METHODS)].sub(forecast["actual"], axis=0).abs()
-    mean_miss = miss.mean() / 1000
-    mean_pct = miss.div(forecast["actual"], axis=0).mean()
-    best = mean_miss.drop("same_as_last_month").idxmin()
-
-    lines = go.Figure()
-    lines.add_scatter(x=forecast["month"], y=forecast["actual"] / 1000, name="Actual", line=dict(color=INK, width=3))
-    for column, color, dash in [
-        ("dl_forecast", TEAL, None),
-        ("forecast", BLUE, None),
-        ("rf_forecast", NAVY, "dash"),
-        ("same_as_last_month", ORANGE, "dot"),
-    ]:
-        lines.add_scatter(
-            x=forecast["month"], y=forecast[column] / 1000, name=FORECAST_METHODS[column][0],
-            line=dict(color=color, width=2, dash=dash),
-            visible=True if column in (best, "same_as_last_month") else "legendonly",
-        )
-    style(lines, "Next-month exports: actual against forecast (click the legend to add methods)", "Bcf per month", height=390)
-
-    rows = pd.DataFrame({
-        "Method": [FORECAST_METHODS[key][0] for key in FORECAST_METHODS],
-        "What it uses": [FORECAST_METHODS[key][1] for key in FORECAST_METHODS],
-        "Average miss": [f"{mean_miss[key]:.1f} Bcf" for key in FORECAST_METHODS],
-        "Average miss, %": [f"{mean_pct[key]:.1%}" for key in FORECAST_METHODS],
-        "vs baseline": ["" if key == "same_as_last_month" else f"{mean_miss[key] / mean_miss['same_as_last_month'] - 1:+.0%}"
-                        for key in FORECAST_METHODS],
-    })
-    return {
-        "lines": lines,
-        "table": rows,
-        "miss": mean_miss,
-        "pct": mean_pct,
-        "best": best,
-        "months": len(forecast),
-        "first": forecast["month"].min(),
-        "last": forecast["month"].max(),
-    }
-
-
-def fault_results():
-    predictions = pd.read_csv(GOLD / "fault_predictions.csv")
-    importance = pd.read_csv(GOLD / "feature_importance.csv")
-    calibration = pd.read_csv(GOLD / "calibration_curve.csv")
-    actual = predictions["is_fault"]
-
-    scores = {}
-    for name, predicted, probability, how in FAULT_METHODS:
-        scores[name] = {
-            "caught": recall_score(actual, predictions[predicted]),
-            "cleared": recall_score(actual, predictions[predicted], pos_label=0),
-            "auc": roc_auc_score(actual, predictions[probability]) if probability else None,
-            "how": how,
-        }
-    # Rank by balanced accuracy: catching faults and clearing normal rows count equally.
-    best = max(scores, key=lambda name: scores[name]["caught"] + scores[name]["cleared"])
-    rule = FAULT_METHODS[0][0]
-    rows = pd.DataFrame({
-        "Method": list(scores),
-        "How it works": [score["how"] for score in scores.values()],
-        "Faults caught": [f"{score['caught']:.1%}" for score in scores.values()],
-        "Normal rows cleared": [f"{score['cleared']:.1%}" for score in scores.values()],
-        "False alarms": [f"{1 - score['cleared']:.1%}" for score in scores.values()],
-        "ROC-AUC": [f"{score['auc']:.3f}" if score["auc"] else "—" for score in scores.values()],
-    })
-
-    columns = [predicted for _, predicted, _, _ in FAULT_METHODS]
-    caught = predictions[actual == 1].groupby("fault_id")[columns].mean()
-    blind_spots = caught.max(axis=1).loc[lambda rate: rate < 0.6].index.tolist()
-
-    dots = go.Figure()
-    for (name, predicted, _, _), color, symbol in zip(
-        FAULT_METHODS, [GRAY, BLUE, NAVY, TEAL], ["circle", "diamond", "cross", "square"]
-    ):
-        dots.add_scatter(
-            x=caught.index, y=caught[predicted], name=name, mode="markers",
-            marker=dict(size=10, color=color, symbol=symbol, line=dict(width=0.5, color="#fff")),
-            hovertemplate=f"<b>{name}</b><br>Fault %{{x}}: %{{y:.0%}} caught<extra></extra>",
-            visible=True if name in (rule, best) else "legendonly",
-        )
-    best_column = dict((name, predicted) for name, predicted, _, _ in FAULT_METHODS)[best]
-    false_alarms = predictions.loc[actual == 0, best_column].mean()
-    dots.add_hline(y=false_alarms, line=dict(color=ORANGE, dash="dash", width=1.2),
-                   annotation_text=f"{best} false-alarm rate ({false_alarms:.0%})", annotation_position="bottom right")
-    style(dots, "Share of fault rows caught, by fault (click the legend to add methods)",
-          "Fault rows caught", "Fault", percent=True, height=370)
-    dots.update_xaxes(dtick=1)
-    dots.update_yaxes(range=[0, 1.06])
-    dots.update_layout(hovermode="closest")
-
-    top = importance.head(12).iloc[::-1]
-    labels = top["tag_name"] + " (" + top["sensor"] + ")"
-    importance_chart = go.Figure()
-    importance_chart.add_bar(y=labels, x=top["level"], name="Reading level", orientation="h", marker_color=BLUE)
-    importance_chart.add_bar(y=labels, x=top["step_change"], name="3-minute change", orientation="h", marker_color=TEAL)
-    style(importance_chart, "Sensors the random forest relies on most", x_title="Share of model importance", height=400)
-    importance_chart.update_layout(barmode="stack", hovermode="y unified", margin=dict(l=210, r=16, t=52, b=36))
-    importance_chart.update_xaxes(tickformat=".0%")
-
-    reliability = go.Figure()
-    reliability.add_scatter(x=[0, 1], y=[0, 1], mode="lines", name="Perfectly calibrated",
-                            line=dict(color=GRAY, dash="dot", width=1.5))
-    for (model, group), color in zip(calibration.groupby("model", sort=False), [ORANGE, BLUE, TEAL]):
-        reliability.add_scatter(x=group["mean_predicted_prob"], y=group["observed_fault_rate"], mode="lines+markers",
-                                name=model, line=dict(color=color, width=2.2), marker=dict(size=8))
-    style(reliability, "Does a 70% fault probability mean 70%?", "Share that were faults",
-          "Predicted fault probability", percent=True, height=400)
-    reliability.update_xaxes(tickformat=".0%", range=[0, 1.02])
-    reliability.update_yaxes(range=[0, 1.05])
-    reliability.update_layout(hovermode="closest")
-
-    return {
-        "dots": dots,
-        "importance": importance_chart,
-        "reliability": reliability,
-        "table": rows,
-        "scores": scores,
-        "best": best,
-        "rule": rule,
-        "blind_spots": blind_spots,
-        "top_tags": importance["tag_name"].head(3).tolist(),
-        "rows": len(predictions),
-    }
+def table(rows):
+    return '<div class="table-wrap">' + pd.DataFrame(rows).to_html(index=False, border=0, escape=True) + '</div>'
 
 
 def main():
-    market = export_results()
-    forecast = forecast_results()
-    faults = fault_results()
+    evaluation = json.loads((GOLD / "evaluation.json").read_text())
+    faults, exports = evaluation["faults"], evaluation["exports"]
+    chosen_fault, chosen_export = faults["selected"], exports["selected"]
+    f, b = faults["test"][chosen_fault], faults["test"]["baseline"]
+    e, eb = exports["test"][chosen_export], exports["test"]["baseline"]
+    predictions = pd.read_csv(GOLD / "fault_predictions.csv")
+    forecast = pd.read_csv(GOLD / "volume_forecast.csv")
+    importance = pd.read_csv(GOLD / "feature_importance.csv").head(8).iloc[::-1]
+    caught_delta = (f["caught"] - b["caught"]) * 100
+    alarm_delta = (f["false_alarm"] - b["false_alarm"]) * 100
+    improvement = 1 - e["mae_bcf"] / eb["mae_bcf"]
+    fault_message = (f"Compared with the rule, this approach catches {abs(caught_delta):.1f} percentage points "
+                     f"{'more' if caught_delta >= 0 else 'fewer'} abnormal readings, with "
+                     f"{abs(alarm_delta):.1f} points {'more' if alarm_delta >= 0 else 'fewer'} false alarms.")
+    if chosen_fault == "baseline":
+        fault_message = "The simple rule won on validation. The learned models remain visible below for an honest comparison."
+    export_message = (f"The selected approach has {abs(improvement):.0%} {'less' if improvement >= 0 else 'more'} error than "
+                      "carrying the previous month’s daily export rate forward.")
+    if chosen_export == "baseline":
+        export_message = "The daily-rate baseline won on validation. Added model complexity did not earn a place in the headline forecast."
 
-    miss, best_forecast = forecast["miss"], forecast["best"]
-    baseline_miss = miss["same_as_last_month"]
-    best_forecast_name = FORECAST_METHODS[best_forecast][0]
-    simple_miss = miss["forecast"]
-    best_fault, rule = faults["best"], faults["rule"]
-    best_score, rule_score = faults["scores"][best_fault], faults["scores"][rule]
-    blind = ", ".join(str(fault) for fault in faults["blind_spots"]) or "none"
-    top_tags = ", ".join(tag.lower() for tag in faults["top_tags"])
-
-    tiles = [
-        (f"{market['share']:.0%}", f"of U.S. LNG exports came from Venture Global's two plants in the last 12 months"),
-        (f"{market['summer']:+.0%}", "average June–September exports against trend: the summer dip a plan must expect"),
-        (f"{miss[best_forecast] / baseline_miss - 1:+.0%}",
-         f"forecast miss against “same as last month” ({miss[best_forecast]:.1f} vs {baseline_miss:.1f} Bcf)"),
-        (f"{best_score['caught']:.0%} / {best_score['cleared']:.0%}",
-         f"fault rows caught / normal rows cleared by the best detector ({rule_score['caught']:.0%} / {rule_score['cleared']:.0%} for the rule)"),
-    ]
-    tile_html = "".join(f'<div class="tile"><b>{value}</b><span>{label}</span></div>' for value, label in tiles)
-
-    questions = pd.DataFrame({
-        "Question": [
-            "<b>1. How much LNG do Venture Global's plants ship, and how fast did that grow?</b>",
-            "<b>2. What regular pattern should a monthly production plan expect?</b>",
-            "<b>3. Can next month's exports be forecast better than “same as last month”?</b>",
-            "<b>4. Can sensor data flag a process fault without flooding the control room with false alarms?</b>",
-            "<b>5. When an alert fires, which sensors should an engineer check first?</b>",
-        ],
-        "Why it matters": [
-            "Sets the stakes: a small gain in train output is a large volume nationally",
-            "A plan that ignores the season over-promises every summer",
-            "Daily targets and cargo plans start from a volume forecast",
-            "Unplanned downtime and safety; too many false alarms and operators stop trusting alerts",
-            "An alert is only useful if it points to where to look",
-        ],
-        "Data": ["EIA exports by terminal", "EIA exports, NOAA Lake Charles temperature", "EIA exports, NOAA temperature",
-                 "Tennessee Eastman sensor runs", "Tennessee Eastman sensor runs"],
-        "Answer": [
-            f"About {market['share']:.0%} of U.S. exports (~{market['vg_bcf']:.0f} Bcf a month), from zero in early 2022",
-            f"Exports run {market['summer']:+.0%} against trend in June–September and {market['winter']:+.0%} in the coldest months",
-            f"Yes. {best_forecast_name} misses by {miss[best_forecast]:.1f} Bcf a month against {baseline_miss:.1f} for the baseline",
-            f"Partly. The best detector, {best_fault}, catches {best_score['caught']:.0%} of fault rows and clears {best_score['cleared']:.0%} of normal rows. Faults {blind} stay hard to see",
-            f"The model leans most on the {top_tags}",
-        ],
-        "See": ['<a href="#market">Results A</a>', '<a href="#market">Results A</a>', '<a href="#forecast">Results B</a>',
-                '<a href="#faults">Results C</a>', '<a href="#faults">Results C</a>'],
-    })
-
-    sources = pd.DataFrame({
-        "Source": [
-            '<a href="https://github.com/camaramm/tennessee-eastman-profBraatz">Tennessee Eastman process benchmark</a> (Braatz, University of Illinois)',
-            '<a href="https://www.eia.gov/dnav/ng/hist/n9133us2m.htm">EIA U.S. LNG exports</a>, monthly',
-            '<a href="https://www.eia.gov/opendata/bulk/">EIA LNG exports by terminal</a>, monthly',
-            '<a href="https://www.eia.gov/dnav/ng/hist/rngwhhdm.htm">EIA Henry Hub spot price</a>, monthly',
-            '<a href="https://www.ncei.noaa.gov/">NOAA monthly climate summary</a>, Lake Charles airport',
-            '<a href="https://www.ncei.noaa.gov/stormevents/">NOAA Storm Events</a>, Louisiana',
-            '<a href="https://github.com/microsoft/sqlworkshops">Microsoft predictive-maintenance sample</a>',
-        ],
-        "Stands in for": [
-            "Plant historian tags (OSIsoft PI): 52 flows, pressures, temperatures and valves every 3 minutes, with labelled faults",
-            "Plant production (LNG rundown)",
-            "Terminal throughput and the cargo schedule",
-            "Feed-gas price and supply",
-            "Ambient air temperature at the trains",
-            "Weather risk around the Gulf terminals",
-            "Work orders and equipment failures",
-        ],
-        "Used for": ["Fault detection (Results C)", "Forecast (Results B)", "Market context (Results A)", "EDA only",
-                     "Seasonal pattern and forecast inputs", "EDA only", "EDA only"],
-    })
-
-    workflow = [
-        ("1. Measure", "Sensors write flows, pressures and temperatures to the OSIsoft PI historian",
-         "<code>download.py</code> lands the public files in <code>data/raw</code>"),
-        ("2. Ingest", "Azure Data Factory copies PI tags and schedules into Azure Data Lake (raw layer)",
-         "Raw files kept as downloaded"),
-        ("3. Clean &amp; build features", "Databricks (PySpark, SQL) cleans, aligns and joins the data into curated tables",
-         "<code>prepare.py</code>: PySpark sets the normal band and flags alerts; DuckDB SQL joins the monthly tables"),
-        ("4. Train &amp; validate", "Forecasting and classification models, tested against simple baselines",
-         "<code>model.py</code>: rule vs random forest vs neural network; forecasts tested month by month"),
-        ("5. Score", "Batch scoring for daily and monthly plans; streaming scoring for live alerts",
-         "Batch: a GitHub Action reruns everything on the 15th of each month"),
-        ("6. Decide", "Production engineers combine alerts, forecasts and the schedule to set each train's target",
-         "This dashboard: what to inspect, and what volume to plan for"),
-    ]
-    workflow_html = "".join(
-        f'<div class="step"><b>{name}</b><p>{at_plant}</p><p class="here">This project: {here}</p></div>'
-        for name, at_plant, here in workflow
-    )
-
-    approach = [
-        ("Understand the problem", "#problem"),
-        ("Frame the questions", "#questions"),
-        ("Find the data", "#data"),
-        ("Build the workflow", "#workflow"),
-        ("Present the results", "#market"),
-    ]
-    approach_html = "".join(f'<a class="chip" href="{href}"><span>{i}</span>{name}</a>'
-                            for i, (name, href) in enumerate(approach, start=1))
-
-    html = f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LNG Sensor to Decision</title>
+    bars = go.Figure()
+    for label, metric, color in [("Abnormal readings detected", "caught", "#087f73"),
+                                  ("Normal readings incorrectly flagged", "false_alarm", "#c27c44")]:
+        bars.add_bar(x=[NAMES[k] for k in NAMES], y=[faults["test"][k][metric] for k in NAMES],
+                     name=label, marker_color=color, text=[f'{faults["test"][k][metric]:.1%}' for k in NAMES],
+                     textposition="outside", hovertemplate="%{x}: %{y:.1%}<extra>" + label + "</extra>")
+    bars.update_layout(barmode="group")
+    bars.update_yaxes(tickformat=".0%", range=[0, 1.08])
+    lines = go.Figure()
+    lines.add_scatter(x=forecast.month, y=forecast.actual / 1000, name="Actual exports",
+                      line=dict(color="#203638", width=3))
+    for kind in NAMES:
+        lines.add_scatter(x=forecast.month, y=forecast[kind] / 1000, name=NAMES[kind],
+                          visible=True if kind in {"baseline", chosen_export} else "legendonly",
+                          line=dict(color=COLORS[kind], width=2, dash="dot" if kind == "baseline" else "solid"))
+    fault_rows = [{"Approach": NAMES[k] + (" · selected" if k == chosen_fault else ""),
+                   "Abnormal detected ↑": f'{faults["test"][k]["caught"]:.1%}',
+                   "False alarms ↓": f'{faults["test"][k]["false_alarm"]:.1%}',
+                   "Balanced accuracy ↑": f'{faults["test"][k]["balanced_accuracy"]:.1%}',
+                   "ROC-AUC ↑": f'{faults["test"][k]["auc"]:.3f}' if faults["test"][k]["auc"] is not None else "—"}
+                  for k in NAMES]
+    export_rows = [{"Approach": NAMES[k] + (" · selected" if k == chosen_export else ""),
+                    "Average error ↓": f'{exports["test"][k]["mae_bcf"]:.1f} Bcf',
+                    "Average percentage error ↓": f'{exports["test"][k]["mape"]:.1%}'} for k in NAMES]
+    per_fault = predictions[predictions.is_fault == 1].groupby("fault_id")[f"{chosen_fault}_predicted"].mean()
+    difficult = ", ".join(str(i) for i in per_fault[per_fault < .5].index) or "None below 50% detection"
+    sensor_chart = go.Figure(go.Bar(x=importance.importance, y=importance.tag_name,
+                                   orientation="h", marker_color="#087f73"))
+    sensor_chart.update_layout(margin=dict(l=220))
+    sensor_chart.update_xaxes(tickformat=".0%")
+    # Keep the chart label area readable on smaller screens through the scroll container.
+    sensor_html = chart(sensor_chart, "sensor-importance", "")
+    per_fault_rows = [{"Fault scenario": int(i), "Abnormal readings detected": f"{rate:.1%}"}
+                      for i, rate in per_fault.items()]
+    html = f'''<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LNG · From data to decisions</title><script src="plotly.min.js"></script>
 <style>
-  :root {{ --ink: #0b0b0b; --muted: #4e4d49; --line: #e4e3de; --surface: #f8f8f6; --card: #ffffff;
-          --blue: #2a78d6; --navy: #163e73; --teal: #159a80; --soft-blue: #eef5fc; --soft-teal: #eaf7f4; }}
-  * {{ box-sizing: border-box; }}
-  body {{ margin: 0; background: var(--surface); color: var(--ink); font: 15px/1.6 system-ui, -apple-system, sans-serif; }}
-  main {{ max-width: 1100px; margin: 0 auto; padding: 32px 16px 72px; }}
-  h1 {{ margin: 0 0 8px; font-size: 30px; line-height: 1.2; letter-spacing: -0.02em; overflow-wrap: anywhere; }}
-  h2 {{ margin: 48px 0 8px; font-size: 22px; border-bottom: 2px solid var(--line); padding-bottom: 8px; scroll-margin-top: 16px; }}
-  h3 {{ margin: 24px 0 6px; font-size: 17px; color: var(--navy); }}
-  p {{ color: var(--muted); max-width: 820px; margin: 0 0 14px; }}
-  a {{ color: var(--blue); }}
-  .subtitle {{ font-size: 16px; max-width: 880px; }}
-  .chips {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 8px; }}
-  .chip {{ display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px;
-           background: var(--card); color: var(--ink); text-decoration: none; font-size: 14px; }}
-  .chip span {{ display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--navy); color: #fff; font-size: 12px; }}
-  .tiles {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin: 24px 0 8px; }}
-  .tile {{ background: var(--card); border: 1px solid var(--line); border-top: 3px solid var(--blue); border-radius: 10px; padding: 16px; }}
-  .tile b {{ display: block; font-size: 28px; margin-bottom: 4px; }}
-  .tile span {{ color: var(--muted); font-size: 13px; line-height: 1.4; display: block; }}
-  .card {{ background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin: 14px 0; overflow-x: auto; }}
-  .card .plotly-graph-div {{ width: 100% !important; }}
-  .grid-2 {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(460px, 100%), 1fr)); gap: 14px; }}
-  .grid-3 {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 14px; }}
-  .box {{ background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }}
-  .box b {{ display: block; color: var(--navy); margin-bottom: 4px; }}
-  .box p {{ margin: 0; font-size: 14px; }}
-  .steps {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 12px; margin: 14px 0; }}
-  .step {{ background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }}
-  .step b {{ display: block; color: var(--navy); margin-bottom: 4px; }}
-  .step p {{ font-size: 14px; margin: 0 0 8px; }}
-  .step .here {{ color: var(--teal); margin: 0; font-size: 13px; }}
-  .note {{ font-size: 13px; color: var(--muted); }}
-  .callout {{ background: var(--soft-blue); border-left: 4px solid var(--blue); border-radius: 6px; padding: 12px 16px; margin: 12px 0 16px; font-size: 14px; }}
-  .callout.action {{ background: var(--soft-teal); border-left-color: var(--teal); }}
-  .callout p, .callout li {{ color: #1e293b; margin: 0 0 6px; }}
-  .callout ul {{ margin: 6px 0 0; padding-left: 20px; }}
-  table {{ border-collapse: collapse; width: 100%; font-size: 13.5px; }}
-  th {{ background: #f3f2ee; font-weight: 600; text-align: left; padding: 10px 12px; border-bottom: 2px solid var(--line); }}
-  td {{ text-align: left; vertical-align: top; padding: 9px 12px; border-bottom: 1px solid var(--line); color: #2e2d2a; }}
-  tr:last-child td {{ border-bottom: none; }}
-  footer {{ margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }}
-</style>
-</head>
-<body>
-<main>
-<h1>From Plant Sensors to LNG Production Decisions</h1>
-<p class="subtitle">
-  This project rebuilds, on public data, the path an LNG operator follows from raw plant readings to a production decision.
-  Sensor readings are cleaned and checked against a normal operating band, models flag process faults and forecast next month's
-  exports, and the results are scored against simple baselines so an engineer can see what is worth trusting.
-  The whole pipeline reruns on the 15th of each month. Latest export data: <b>{market['latest']:%B %Y}</b>.
-</p>
-<div class="chips">{approach_html}</div>
-<div class="tiles">{tile_html}</div>
-
-<h2 id="problem">1. The problem</h2>
-<p>
-  An LNG plant earns money by keeping its liquefaction trains producing as much as they safely can. Calcasieu Pass runs 18 mid-scale trains,
-  and Plaquemines is adding more. At about {market['vg_bcf']:.0f} Bcf a month, a 1% gain in output is roughly {market['vg_bcf'] / 100:.1f} Bcf a month.
-  Three issues decide that output:
-</p>
-<div class="grid-3">
-  <div class="box"><b>Production efficiency</b><p>Get more LNG from the trains already running, and know what each month should deliver.</p></div>
-  <div class="box"><b>Downtime and safety</b><p>Catch a process fault early, while keeping false alarms low enough that operators trust the alerts.</p></div>
-  <div class="box"><b>Planning</b><p>Daily targets, maintenance and cargo schedules all depend on a volume forecast that matches what the plant delivers.</p></div>
-</div>
-
-<h2 id="questions">2. Questions this dashboard answers</h2>
-<p>Each question comes from one of the issues above. The answers update every month from the latest data.</p>
-<div class="card">{table(questions)}</div>
-
-<h2 id="data">3. Data sources</h2>
-<p>Real plant telemetry is private, so each public source stands in for one internal feed.</p>
-<div class="card">{table(sources)}</div>
-
-<h2 id="workflow">4. Workflow and tools</h2>
-<h3>How the machine-learning workflow typically runs at an LNG operator</h3>
-<p class="note">
-  This is an assumed workflow, pieced together from public job postings (OSIsoft PI, Azure Data Factory, Azure Data Lake, Databricks,
-  forecasting and classification). It is not an internal diagram. Each step shows the matching part of this project.
-</p>
-<div class="steps">{workflow_html}</div>
-<div class="callout">
-  <p><b>Tools used:</b> Python, PySpark (standing in for Databricks), DuckDB SQL, pandas, scikit-learn (random forest, neural network),
-  Plotly, and GitHub Actions for the monthly rebuild. Tables follow raw → silver (cleaned) → gold (joined, model outputs).</p>
-  <p><b>Rule for every model:</b> it is scored only on data it never trained on, and it has to beat a simple baseline that an engineer would use anyway.</p>
-</div>
-
-<h2 id="market">5. Results A: what drives U.S. LNG volume</h2>
-<p>
-  Venture Global's plants went from nothing in early 2022 to about <b>{market['share']:.0%} of U.S. LNG exports</b>.
-  Exports also follow the season: they run <b>{market['summer']:+.0%}</b> against trend from June to September and
-  <b>{market['winter']:+.0%}</b> in the coldest months. That is consistent with liquefaction losing capacity in hot air, as compressors
-  and air coolers work harder, and with maintenance being scheduled outside winter.
-</p>
-<div class="card">{chart(market['stack'], first=True)}</div>
-<div class="card">{chart(market['season'])}</div>
-
-<h2 id="forecast">6. Results B: next-month export forecast</h2>
-<p>
-  <b>What is compared:</b> six ways to forecast next month's U.S. LNG exports. <b>What counts as actual:</b> EIA's reported exports for that month.
-  <b>How:</b> each of the last {forecast['months']} months ({forecast['first']:%b %Y} – {forecast['last']:%b %Y}) is forecast using only the months before it,
-  the way a real plan is made.
-</p>
-<div class="card">{chart(forecast['lines'])}</div>
-<div class="card">{table(forecast['table'])}</div>
-<div class="callout">
-  <ul>
-    <li><b>Counting days does most of the work.</b> Scaling last month's daily rate by the days in the coming month cuts the miss from
-      {baseline_miss:.1f} to {miss['same_daily_rate']:.1f} Bcf.</li>
-    <li><b>The season adds a little.</b> Blending in the usual calendar-month change brings it to {simple_miss:.1f} Bcf ({miss['forecast'] / baseline_miss - 1:+.0%}).</li>
-    <li><b>The learned models are close to the simple blend.</b> The best method, {best_forecast_name}, misses by {miss[best_forecast]:.1f} Bcf,
-      {abs(simple_miss - miss[best_forecast]):.1f} Bcf from the blend. With {forecast['months']} test months, a gap that small is within noise,
-      so the simple blend is the easier one to explain and maintain.</li>
-  </ul>
-</div>
-<div class="callout action">
-  <p><b>What a planner does with it:</b> plan around the forecast, not the baseline, and expect the summer dip. The remaining miss comes from new trains
-  ramping up and cargo timing, which national totals cannot see. Inside a plant, adding commissioning dates and maintenance windows is the next step.</p>
-</div>
-
-<h2 id="faults">7. Results C: sensor fault detection</h2>
-<p>
-  <b>What is compared:</b> a 3-sigma alarm rule against three machine-learning models. <b>What counts as actual:</b> the benchmark's labels, where a test run
-  is normal for 8 hours and then a known fault is switched on. <b>How:</b> models train on one set of runs and are scored on {faults['rows']:,} rows of
-  separate test runs they never saw.
-</p>
-<div class="card">{table(faults['table'])}</div>
-<div class="card">{chart(faults['dots'])}</div>
-<div class="grid-2">
-  <div class="card">{chart(faults['importance'])}</div>
-  <div class="card">{chart(faults['reliability'])}</div>
-</div>
-<div class="callout">
-  <ul>
-    <li><b>The rule is a strong baseline.</b> It catches {rule_score['caught']:.0%} of fault rows and clears {rule_score['cleared']:.0%} of normal rows.</li>
-    <li><b>The best detector is the {best_fault}:</b> {best_score['caught']:.0%} caught and {best_score['cleared']:.0%} cleared. Averaging over 15 minutes
-      matters as much as the model, because a real fault persists and noise does not.</li>
-    <li><b>Some faults stay hidden.</b> Faults {blind} are caught less than 60% of the time by every method. The benchmark literature reports the same:
-      they barely move the 52 sensors. Better instruments or more normal history would help more than a bigger model.</li>
-    <li><b>Where to look first:</b> the {top_tags} carry the most weight in the random forest.</li>
-  </ul>
-</div>
-<div class="callout action">
-  <p><b>What an engineer does with it:</b> treat an alert as a reason to inspect the train before raising its target, start with the sensors above,
-  and only page the field crew when the alert holds for several readings.</p>
-</div>
-
-<h2>8. Limits</h2>
-<p>
-  Public data stands in for plant data, so the numbers show the method, not Venture Global's actual performance. The fault benchmark is a chemical process,
-  not an LNG train, and "normal" is learned from a single 25-hour run. The forecast uses national totals, not train-level rundown. Each limit has a direct
-  fix inside a plant: PI tags with maintenance labels, longer normal history, and train-level volumes.
-</p>
-
-<footer>
-  Pipeline: <code>download.py</code> → <code>prepare.py</code> (PySpark, DuckDB) → <code>model.py</code> (scikit-learn) → <code>dashboard.py</code>, rebuilt monthly by GitHub Actions.
-  Source code: <a href="https://github.com/mhadeli/lng-sensor-to-decision">github.com/mhadeli/lng-sensor-to-decision</a>.
-</footer>
-</main>
-</body>
-</html>
-"""
+:root{{--ink:#203638;--muted:#5e6f70;--teal:#087f73;--line:#dce3de;--paper:#f5f6f1}}
+*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:var(--paper);color:var(--ink);font:16px/1.65 system-ui,-apple-system,sans-serif}}
+main{{max-width:1120px;margin:auto;padding:36px 28px 60px}}nav{{display:flex;justify-content:space-between;gap:20px;align-items:center;padding-bottom:30px;font-size:13px}}nav span{{letter-spacing:.13em;font-weight:700}}nav a{{margin-left:22px;color:var(--muted);text-decoration:none}}
+header{{padding:32px 0 34px;max-width:830px}}.eyebrow{{color:var(--teal);text-transform:uppercase;letter-spacing:.14em;font-size:12px;font-weight:700}}h1{{font-size:clamp(36px,5vw,58px);line-height:1.1;font-weight:650;letter-spacing:-.045em;margin:18px 0 22px}}header p{{font-size:19px;color:var(--muted);max-width:740px}}h2{{font-size:26px;line-height:1.25;letter-spacing:-.025em;margin:8px 0 12px}}h3{{font-size:16px;margin:0 0 8px}}p{{margin:10px 0 18px}}.muted,.note{{color:var(--muted)}}.note{{font-size:13px}}.steps{{display:grid;grid-template-columns:repeat(3,1fr);gap:28px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:24px 0;margin:0 0 36px}}.steps p{{font-size:14px;color:var(--muted);margin:0}}.steps b{{color:var(--teal);margin-right:8px}}section{{scroll-margin-top:20px;background:white;border:1px solid var(--line);border-radius:16px;padding:30px;margin-bottom:24px}}.section-head{{max-width:800px}}.section-head p{{color:var(--muted)}}.metrics{{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;padding:24px 0;border-top:1px solid var(--line)}}.metric strong{{display:block;font-size:36px;letter-spacing:-.04em;line-height:1.25}}.metric span{{font-size:13px;color:var(--muted)}}.takeaway{{background:#eff6f2;border-left:3px solid var(--teal);padding:14px 18px;font-size:15px;margin:16px 0 24px}}.chart{{min-width:0}}details{{border-top:1px solid var(--line);padding:18px 0 0;margin-top:16px}}summary{{cursor:pointer;font-size:14px;font-weight:650;color:var(--teal)}}details p{{font-size:14px}}.table-wrap{{overflow-x:auto;margin:20px 0}}table{{width:100%;border-collapse:collapse;font-size:13px;text-align:left}}th,td{{padding:13px 12px;border-bottom:1px solid var(--line);text-align:left!important}}th{{color:var(--muted);font-weight:600;background:#f7f9f6}}.transfer{{display:grid;grid-template-columns:repeat(3,1fr);gap:28px;margin-top:25px}}.transfer p{{font-size:14px;color:var(--muted)}}a{{color:var(--teal)}}footer{{font-size:12px;color:var(--muted);padding:10px 2px}}a:focus-visible,summary:focus-visible{{outline:3px solid #296abd;outline-offset:4px}}
+@media(max-width:680px){{main{{padding:20px 14px}}nav a{{margin-left:10px}}nav span{{font-size:10px}}section{{padding:22px 16px}}.steps,.transfer{{grid-template-columns:1fr;gap:18px}}.metrics{{gap:12px}}.metric strong{{font-size:27px}}.metric span{{font-size:12px}}h2{{font-size:23px}}header p{{font-size:17px}}.sensor-chart{{overflow-x:auto}}.sensor-chart>div{{min-width:640px}}}}
+</style></head><body><main>
+<nav aria-label="Page sections"><span>DATA SCIENCE PORTFOLIO</span><div><a href="#detect">Detection</a><a href="#plan">Planning</a><a href="#apply">Application</a></div></nav>
+<header><div class="eyebrow">LNG · From data to decisions</div><h1>Spot process changes.<br>Make better plans.</h1><p>I built a reproducible data science workflow to answer two operational questions: can we identify abnormal sensor behavior, and how accurately can we forecast next month’s LNG exports?</p><p class="note">A demonstration using simulated process readings and public U.S. export data. Results measure performance on these datasets, not an operating LNG facility.</p></header>
+<div class="steps"><div><h3><b>01</b> Prepare the data</h3><p>Validate sensor histories and monthly exports. Keep original data separate from model-ready tables.</p></div><div><h3><b>02</b> Compare three approaches</h3><p>A simple baseline, a small neural network, and XGBoost. Choose settings before evaluating the final test data.</p></div><div><h3><b>03</b> Explain the trade-offs</h3><p>Show detection, false alarms, and forecast error in terms an operations team can use.</p></div></div>
+<section id="detect"><div class="section-head"><div class="eyebrow">01 / Process monitoring</div><h2>Which readings deserve a closer look?</h2><p>Identify abnormal behavior across 52 simulated process sensors. The practical trade-off: catch more problems without overwhelming operators with false alarms.</p></div>
+<div class="metrics"><div class="metric"><strong>{f['caught']:.0%}</strong><span>abnormal readings detected</span></div><div class="metric"><strong>{f['false_alarm']:.1%}</strong><span>normal readings incorrectly flagged</span></div><div class="metric"><strong>{faults['test_rows']:,}</strong><span>readings in separate test runs</span></div></div>
+<p class="note">Headline approach: <b>{NAMES[chosen_fault]}</b>, selected on validation data. Rates describe individual readings, not incidents prevented.</p>
+<div class="chart" role="img" aria-label="Detection and false alarm rates for the three approaches">{chart(bars, 'fault-comparison', 'Share of readings')}</div>
+<div class="takeaway">{fault_message} Use these flags to prioritize investigation; they do not identify the cause of a fault.</div>
+<details><summary>Explore the model comparison and evaluation</summary>{table(fault_rows)}<p>The baseline flags any sensor outside its normal training mean ± three standard deviations. Both learned models use sensor levels, changes, and trailing five-reading averages, scaled against normal training operation with absolute deviation features; their scores are also averaged over five readings. This reduces noise but can delay detection.</p><p>Settings and alert thresholds maximize balanced accuracy on the last quarter of each training run, with a five-reading gap. Models are then refitted on all training runs and evaluated on separate test runs. The same fault scenarios appear in training and test; this does not establish performance on new fault types. There is only one normal training run, so validation remains limited. The benchmark test data has been reviewed during development; a fresh prospective evaluation is still needed.</p><p>Scores are model outputs, not calibrated failure probabilities. Balanced accuracy gives detection and correctly clearing normal readings equal weight. ROC-AUC measures ranking across thresholds.</p><p><b>Where performance is weak:</b> fault scenarios with fewer than half of abnormal readings detected: {escape(difficult)}.</p>{table(per_fault_rows)}</details>
+<details><summary>See which sensors XGBoost uses most</summary><div class="sensor-chart">{sensor_html}</div><p>Importance is the model’s relative reliance on each sensor, combined across levels, changes, and rolling means. Correlated inputs can share importance. This is not a root-cause diagnosis.</p></details></section>
+<section id="plan"><div class="section-head"><div class="eyebrow">02 / Monthly planning</div><h2>How close can next month’s forecast get?</h2><p>Forecast U.S. LNG export volume one month ahead. Each estimate uses only observations from earlier months, then gets compared with the actual outcome.</p></div>
+<div class="metrics"><div class="metric"><strong>{e['mae_bcf']:.1f} Bcf</strong><span>average monthly forecast error</span></div><div class="metric"><strong>{e['mape']:.1%}</strong><span>average percentage error</span></div><div class="metric"><strong>{exports['test_months']}</strong><span>months evaluated one at a time</span></div></div>
+<p class="note">Headline approach: <b>{NAMES[chosen_export]}</b>, selected on validation data. Test period: {exports['test_first']} to {exports['test_last']}. Bcf = billion cubic feet of gas.</p>
+<div class="chart" role="img" aria-label="Actual monthly exports and historical one-month-ahead forecasts">{chart(lines, 'export-forecast', 'Monthly exports (Bcf)')}</div><p class="note">Click a legend label to show or hide an approach. These are historical test forecasts, not a live forecast.</p>
+<div class="takeaway">{export_message} This gives a national planning benchmark; a plant-level plan would also need availability, feed gas, and cargo schedules.</div>
+<details><summary>Explore forecast accuracy and the backtest</summary>{table(export_rows)}<p>The baseline carries the previous month’s daily export rate into the next month, adjusting for its number of days. MLP and XGBoost learn the change in daily rate using seasonality and lagged growth. Every seasonal feature is calculated using earlier observations only.</p><p>Model settings are selected on {exports['validation_first']} to {exports['validation_last']}, before the final {exports['test_months']}-month evaluation. The selected approach stays fixed; models refit as each month becomes available. Published data can be revised and arrive with a delay. This backtest assumes the prior month is available and does not recreate historical publication vintages.</p><p>Average error is mean absolute error. Percentage error averages each month’s absolute error divided by actual exports. No claim of savings or production gains is made from this retrospective test.</p></details></section>
+<section id="apply"><div class="eyebrow">From demonstration to plant use</div><h2>How I would apply the same workflow</h2><p class="muted">Start with a decision and its owner, then agree on the data and evidence needed to support it.</p><div class="transfer"><div><h3>Work with operations</h3><p>Define an actionable fault event, forecast horizon, and acceptable false-alarm rate. Review missed events with engineers and agree on what should trigger a response.</p></div><div><h3>Connect plant context</h3><p>Combine historian readings with train status and maintenance records. For forecasts, add feed-gas constraints, planned outages, and cargo schedules.</p></div><div><h3>Validate before rollout</h3><p>Test on later periods and separate trains. Run alongside existing processes, measure detection delay and alert burden, then monitor drift and retraining needs.</p></div></div>
+<details><summary>Review the workflow, sources, and reproducibility</summary><p><b>Implemented:</b> Python ingestion → pandas validation and DuckDB SQL → baseline / MLP / XGBoost → saved predictions and evaluation → this static dashboard. Optional PySpark preparation demonstrates a path to larger data volumes. GitHub Actions rebuilds and publishes after checks pass.</p><p><b>Possible plant deployment:</b> Data Factory ingestion into Azure Data Lake; Databricks for preparation and scheduled scoring; governed outputs for engineering review. This is a proposed adaptation, not a deployed integration.</p><p><b>Sources:</b> <a href="https://github.com/camaramm/tennessee-eastman-profBraatz">Tennessee Eastman process simulation</a> and <a href="https://www.eia.gov/dnav/ng/hist_xls/N9133US2m.xls">EIA monthly U.S. LNG exports</a>. The two datasets answer separate questions and are not joined as if they represented the same facility.</p><p>Rebuild locally with <code>python download.py</code>, <code>python prepare.py</code>, <code>python model.py</code>, and <code>python dashboard.py</code>. Read the project README for evaluation design and limitations.</p></details></section>
+<footer>Public-data portfolio · Python / SQL / scikit-learn / XGBoost · All displayed metrics are calculated from saved test predictions.</footer>
+</main><script>document.querySelectorAll('details').forEach(d=>d.addEventListener('toggle',()=>{{if(d.open)d.querySelectorAll('.plotly-graph-div').forEach(g=>Plotly.Plots.resize(g));}}));</script></body></html>'''
     SITE.mkdir(exist_ok=True)
+    (SITE / "plotly.min.js").write_text(get_plotlyjs())
     (SITE / "index.html").write_text(html)
-    print(f"wrote {(SITE / 'index.html').relative_to(ROOT)}")
+    print(f"Built {SITE / 'index.html'}")
 
 
 if __name__ == "__main__":

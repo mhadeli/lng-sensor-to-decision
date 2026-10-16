@@ -1,5 +1,6 @@
 """Build cleaned tables, alerts, and the monthly planning table."""
 
+import argparse
 import os
 import re
 import subprocess
@@ -7,8 +8,6 @@ from pathlib import Path
 
 import duckdb
 import pandas as pd
-from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
 
 ROOT = Path(__file__).resolve().parent
 RAW = ROOT / "data" / "raw"
@@ -50,8 +49,11 @@ def ensure_java():
     os.environ["JAVA_HOME"] = home
 
 
-def write_sensors_and_alerts(sensors):
+def write_sensors_and_alerts_spark(sensors):
     """Spark stands in for Databricks. The normal band comes from the normal training run only."""
+    from pyspark.sql import SparkSession
+    from pyspark.sql import functions as F
+
     ensure_java()
     spark = (
         SparkSession.builder.master("local[1]")
@@ -85,6 +87,21 @@ def write_sensors_and_alerts(sensors):
     sensors.to_csv(SILVER / "sensors.csv", index=False)
     alerts.to_csv(GOLD / "alerts.csv", index=False)
     print(f"sensors: {len(sensors):,} rows, alerts: {alerts['outside_limits'].sum():,}")
+
+
+def write_sensors_and_alerts(sensors):
+    """Vectorized local preparation; Spark is optional for demonstrating scale-out."""
+    if sensors.duplicated(["split", "fault_id", "step"]).any():
+        raise ValueError("Duplicate sensor observations")
+    measures = [c for c in sensors if re.fullmatch(r"x\d+", c)]
+    if len(measures) != 52 or sensors[measures].isna().any().any():
+        raise ValueError("Expected 52 complete sensor measurements")
+    normal = sensors.loc[(sensors.split == "train") & (sensors.fault_id == 0), measures]
+    alerts = sensors[["split", "fault_id", "step", "is_fault"]].copy()
+    alerts["outside_limits"] = ((sensors[measures] - normal.mean()).abs() > 3 * normal.std()).any(axis=1).astype(int)
+    sensors.to_csv(SILVER / "sensors.csv", index=False)
+    alerts.to_csv(GOLD / "alerts.csv", index=False)
+    print(f"Prepared {len(sensors):,} sensor observations")
 
 
 def load_storms():
@@ -128,11 +145,23 @@ def load_maintenance():
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--extras", action="store_true", help="Prepare the original supporting EDA datasets")
+    parser.add_argument("--spark", action="store_true", help="Use optional PySpark for sensor preparation")
+    args = parser.parse_args()
     SILVER.mkdir(parents=True, exist_ok=True)
     GOLD.mkdir(parents=True, exist_ok=True)
-    write_sensors_and_alerts(load_tep())
+    prepare_sensors = write_sensors_and_alerts_spark if args.spark else write_sensors_and_alerts
+    prepare_sensors(load_tep())
 
     exports = pd.read_csv(RAW / "lng_exports.csv")
+    if exports.month.duplicated().any() or exports.exports_mmcf.isna().any() or (exports.exports_mmcf <= 0).any():
+        raise ValueError("Expected unique months and positive export volumes")
+    exports = duckdb.sql("SELECT month, exports_mmcf FROM exports ORDER BY month").df()
+    exports.to_csv(SILVER / "exports.csv", index=False)
+    if not args.extras:
+        print(f"Prepared {len(exports):,} export months")
+        return
     price = pd.read_csv(RAW / "henry_hub.csv")
     weather = pd.read_csv(RAW / "lake_charles_weather.csv").rename(
         columns={"DATE": "month", "TAVG": "temp_c"}
