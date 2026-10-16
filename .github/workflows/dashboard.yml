@@ -1,0 +1,58 @@
+# Rebuild the pipeline and publish the dashboard to GitHub Pages.
+# Runs on every push to main, on the 15th of each month (after EIA's monthly update), and on demand.
+# If any step fails, nothing is deployed and the last good dashboard stays online.
+name: dashboard
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 12 15 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # PySpark needs Java.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - run: pip install -r requirements.txt
+
+      - run: python download.py
+      - run: python prepare.py
+      - run: python model.py
+      - run: python dashboard.py
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
