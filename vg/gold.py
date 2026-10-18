@@ -89,6 +89,7 @@ def build(timings):
             "destination_mix": mix, "realized_vs_modeled": realized, "doe_sec_reconciliation": reconciliation,
             "henry_hub_forecasts": hh_predictions, "henry_hub_metrics": hh_metrics, "round_trips": trips,
             "port_calls": calls, "voyage_costs": costs, "ship_league": ships}
+    WAREHOUSE.parent.mkdir(parents=True, exist_ok=True)
     with duckdb.connect(str(WAREHOUSE)) as con:
         con.execute("CREATE SCHEMA IF NOT EXISTS silver; CREATE SCHEMA IF NOT EXISTS gold")
         step("store silver", store, s, "silver", con)
