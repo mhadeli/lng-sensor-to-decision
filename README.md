@@ -40,6 +40,22 @@ No cloud account, API key or network access is needed to build: raw inputs are c
 | `tests/` | Leakage, contracts, parsing, detection, voyage arithmetic, port-call matching |
 | `docs/` | Methodology and limits for each page and for the data platform |
 
+## Project structure
+
+Raw files stay in `bronze/`. The build writes checked tables, then one table per question, then the site. `data/` and `site/` are generated and are not committed.
+
+```
+bronze/            pinned snapshots and bronze/manifest.json (checksum, URL, license)
+reference/         capacities, ports, events, shipping assumptions
+vg/                pipeline code: bronze → silver → gold, analyses, page templates
+tests/             contracts, leakage, parsing, detection
+docs/              method and limits for each page
+pipeline.py        one command: tests, build, render
+data/silver/       cleaned tables (cargoes, prices, weather, filings)
+data/gold/         one mart per question, plus data/warehouse.duckdb
+site/              static dashboard
+```
+
 ## Sources
 
 DOE LNG export workbook · Venture Global 10-K/10-Q (SEC EDGAR) · EIA Henry Hub · IMF prices via FRED · Open-Meteo / ERA5 weather and marine data · NHC HURDAT2 · NOAA Storm Events · NOAA MarineCadastre AIS. Licenses and hashes are listed on the Data page and in `bronze/manifest.json`.
