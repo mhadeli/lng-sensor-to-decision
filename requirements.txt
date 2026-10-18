@@ -1,10 +1,9 @@
 pandas==3.0.6
 duckdb==1.5.6
 scikit-learn==1.9.1
-matplotlib==3.11.2
-requests==2.34.2
-plotly==6.3.0
-
-# Reader for the EIA legacy .xls workbook.
-xlrd==1.2.0
 xgboost==3.2.0
+plotly==6.3.0
+requests==2.34.2
+openpyxl==3.1.5
+joblib==1.6.0
+threadpoolctl==3.7.0

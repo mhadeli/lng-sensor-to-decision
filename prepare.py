@@ -1,211 +1,136 @@
-"""Build cleaned tables, alerts, and the monthly planning table."""
-
-import argparse
-import os
-import re
-import subprocess
-from pathlib import Path
+"""Validate public inputs and build a local SQL warehouse and causal feature table."""
+import json
 
 import duckdb
+import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parent
-RAW = ROOT / "data" / "raw"
-SILVER = ROOT / "data" / "silver"
-GOLD = ROOT / "data" / "gold"
+from common import DATABASE, GOLD, RAW, ROOT, SILVER, file_hash, write_json, write_parquet
 
-# In the test runs dXX_te.dat the fault is switched on at step 160.
-# In the training runs dXX.dat it is already on when recording starts.
-FAULT_START = 160
-
-
-def load_tep():
-    frames = []
-    for path in sorted((RAW / "tep").glob("d*.dat")):
-        frame = pd.read_csv(path, sep=r"\s+", header=None)
-        # The normal training file is stored with one row per sensor.
-        if frame.shape[1] > frame.shape[0]:
-            frame = frame.T.reset_index(drop=True)
-        frame.columns = [f"x{i}" for i in range(1, len(frame.columns) + 1)]
-        fault_id = int(path.name[1:3])
-        split = "test" if path.stem.endswith("_te") else "train"
-        frame.insert(0, "split", split)
-        frame.insert(1, "fault_id", fault_id)
-        frame.insert(2, "step", range(len(frame)))
-        fault_on = frame["step"] >= (FAULT_START if split == "test" else 0)
-        frame.insert(3, "is_fault", (fault_on & (fault_id > 0)).astype(int))
-        frames.append(frame)
-    return pd.concat(frames, ignore_index=True)
+SCHEMAS = {
+    "machines": ["machineID", "model", "age"],
+    "telemetry": ["datetime", "machineID", "volt", "rotate", "pressure", "vibration"],
+    "errors": ["datetime", "machineID", "errorID"],
+    "maintenance": ["datetime", "machineID", "comp"],
+    "failures": ["datetime", "machineID", "failure"],
+}
+SENSORS = ["volt", "rotate", "pressure", "vibration"]
 
 
-def ensure_java():
-    """PySpark needs Java. On a Mac, find it if JAVA_HOME is not set."""
-    if os.environ.get("JAVA_HOME"):
-        return
-    try:
-        home = subprocess.check_output(["/usr/libexec/java_home"], text=True).strip()
-    except (OSError, subprocess.CalledProcessError):
-        return
-    os.environ["JAVA_HOME"] = home
+def validate_table(frame, name, machine_ids=None):
+    required = SCHEMAS[name]
+    if set(frame.columns) != set(required):
+        raise ValueError(f"Unexpected {name} schema: {list(frame)}")
+    frame = frame.copy()
+    if "datetime" in frame:
+        frame["datetime"] = pd.to_datetime(frame.datetime, errors="coerce")
+    numeric = ["machineID"] + (SENSORS if name == "telemetry" else ["age"] if name == "machines" else [])
+    for column in numeric:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    invalid = frame[required].isna().any(axis=1) | ~np.isfinite(frame[numeric]).all(axis=1)
+    invalid |= (frame.machineID < 1) | (frame.machineID % 1 != 0)
+    if "datetime" in frame:
+        invalid |= frame.datetime != frame.datetime.dt.floor("h")
+    if machine_ids is not None:
+        invalid |= ~frame.machineID.isin(machine_ids)
+    if name == "telemetry":
+        invalid |= (frame[SENSORS] <= 0).any(axis=1)
+    if name == "machines":
+        invalid |= (frame.age < 0) | ~frame.model.isin([f"model{i}" for i in range(1, 5)])
+    for column, prefix, size in [("errorID", "error", 5), ("comp", "comp", 4), ("failure", "comp", 4)]:
+        if column in frame:
+            invalid |= ~frame[column].isin([f"{prefix}{i}" for i in range(1, size + 1)])
+    keys = ["machineID"] if name == "machines" else ["machineID", "datetime"] if name == "telemetry" else required
+    invalid |= frame.duplicated(keys, keep="first")
+    rejected = frame[invalid].copy()
+    rejected["reason"] = "invalid value, duplicate key, or unknown machine"
+    return frame[~invalid].copy(), rejected
 
 
-def write_sensors_and_alerts_spark(sensors):
-    """Spark stands in for Databricks. The normal band comes from the normal training run only."""
-    from pyspark.sql import SparkSession
-    from pyspark.sql import functions as F
-
-    ensure_java()
-    spark = (
-        SparkSession.builder.master("local[1]")
-        .appName("lng-sensors")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.execution.arrow.pyspark.enabled", "false")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("ERROR")
-    frame = spark.createDataFrame(sensors)
-    measures = [column for column in frame.columns if re.fullmatch(r"x\d+", column)]
-    normal = frame.filter((F.col("split") == "train") & (F.col("fault_id") == 0))
-    stats = normal.agg(
-        *[F.mean(column).alias(f"{column}_mean") for column in measures],
-        *[F.stddev(column).alias(f"{column}_std") for column in measures],
-    ).collect()[0]
-
-    outside = F.lit(False)
-    for column in measures:
-        mean = stats[f"{column}_mean"]
-        std = stats[f"{column}_std"] or 0.0
-        outside = outside | (F.abs(F.col(column) - mean) > 3 * std)
-
-    alerts = (
-        frame.withColumn("outside_limits", outside.cast("int"))
-        .select("split", "fault_id", "step", "is_fault", "outside_limits")
-        .toPandas()
-    )
-    spark.stop()
-
-    sensors.to_csv(SILVER / "sensors.csv", index=False)
-    alerts.to_csv(GOLD / "alerts.csv", index=False)
-    print(f"sensors: {len(sensors):,} rows, alerts: {alerts['outside_limits'].sum():,}")
+def build_features(con):
+    return con.execute((ROOT / "sql" / "features.sql").read_text()).df()
 
 
-def write_sensors_and_alerts(sensors):
-    """Vectorized local preparation; Spark is optional for demonstrating scale-out."""
-    if sensors.duplicated(["split", "fault_id", "step"]).any():
-        raise ValueError("Duplicate sensor observations")
-    measures = [c for c in sensors if re.fullmatch(r"x\d+", c)]
-    if len(measures) != 52 or sensors[measures].isna().any().any():
-        raise ValueError("Expected 52 complete sensor measurements")
-    normal = sensors.loc[(sensors.split == "train") & (sensors.fault_id == 0), measures]
-    alerts = sensors[["split", "fault_id", "step", "is_fault"]].copy()
-    alerts["outside_limits"] = ((sensors[measures] - normal.mean()).abs() > 3 * normal.std()).any(axis=1).astype(int)
-    sensors.to_csv(SILVER / "sensors.csv", index=False)
-    alerts.to_csv(GOLD / "alerts.csv", index=False)
-    print(f"Prepared {len(sensors):,} sensor observations")
+def add_labels(features, failures, telemetry):
+    """Strictly future failure in (t, t+24h]; unknown observation tails stay unlabeled."""
+    result = features.copy()
+    result["failure_24h"] = np.nan
+    for machine, group in result.groupby("machineID"):
+        observed = telemetry[telemetry.machineID == machine].datetime.sort_values()
+        times = group.datetime.to_numpy(dtype="datetime64[us]")
+        failure_times = np.sort(failures.loc[failures.machineID == machine, "datetime"].unique().astype("datetime64[us]"))
+        left = np.searchsorted(failure_times, times, side="right")
+        right = np.searchsorted(failure_times, times + np.timedelta64(24, "h"), side="right")
+        # A complete future interval and no failure at the decision instant are required.
+        future = observed.to_numpy(dtype="datetime64[us]")
+        count = (np.searchsorted(future, times + np.timedelta64(24, "h"), side="right") -
+                 np.searchsorted(future, times, side="right"))
+        eligible = (count == 24) & ~np.isin(times, failure_times)
+        result.loc[group.index[eligible], "failure_24h"] = (right > left)[eligible].astype(int)
+    return result
 
 
-def load_storms():
-    """Louisiana storm events per month. Months with no storms count as zero."""
-    # NOAA reissues each year with a newer creation date. Keep only the newest file per year.
-    newest = {}
-    for path in sorted((RAW / "noaa").glob("*.csv.gz")):
-        newest[re.search(r"_d(\d{4})_", path.name).group(1)] = path
-    storms = pd.concat(
-        [pd.read_csv(path, usecols=["STATE", "BEGIN_YEARMONTH"]) for path in newest.values()],
-        ignore_index=True,
-    )
-    storms = storms[storms["STATE"].str.strip().str.upper() == "LOUISIANA"]
-    months = pd.to_datetime(storms["BEGIN_YEARMONTH"].astype(str), format="%Y%m")
-    counts = months.dt.to_period("M").value_counts()
-    every_month = pd.period_range(counts.index.min(), counts.index.max(), freq="M")
-    counts = counts.reindex(every_month, fill_value=0).sort_index()
-    return pd.DataFrame({"month": counts.index.astype(str), "storms": counts.to_numpy()})
-
-
-def load_terminals():
-    terminals = pd.read_csv(RAW / "gulf_lng_exports.csv")
-    monthly = terminals.groupby("month", as_index=False)["exports_mmcf"].sum()
-    return monthly.rename(columns={"exports_mmcf": "terminal_mmcf"})
-
-
-def load_maintenance():
-    work = pd.read_csv(RAW / "pdm" / "PdM_maint.csv", parse_dates=["datetime"])
-    failures = pd.read_csv(RAW / "pdm" / "PdM_failures.csv", parse_dates=["datetime"])
-    work["month"] = work["datetime"].dt.strftime("%Y-%m")
-    failures["month"] = failures["datetime"].dt.strftime("%Y-%m")
-    jobs = work.groupby("month").size().rename("maintenance_jobs")
-    breaks = failures.groupby("month").size().rename("failures")
-    return (
-        pd.concat([jobs, breaks], axis=1)
-        .fillna(0)
-        .astype(int)
-        .reset_index()
-        .sort_values("month")
-    )
+def prepare_exports(con):
+    """Preserve transaction rows; a vessel can legitimately have several allocations."""
+    raw = pd.read_excel(RAW / "doe_lng_exports_2026_07.xlsx", sheet_name="By Vessel and ISO Container")
+    raw = raw.rename(columns={"Arrival/Departure Date": "date", "Point of Entry or Exit": "terminal",
+                              "Volume (MMCF)": "volume_mmcf"})
+    raw["source_row"] = np.arange(2, len(raw) + 2)
+    raw["date"] = pd.to_datetime(raw.date, errors="coerce")
+    raw["volume_mmcf"] = pd.to_numeric(raw.volume_mmcf, errors="coerce")
+    invalid = raw[["date", "terminal", "volume_mmcf"]].isna().any(axis=1) | (raw.volume_mmcf < 0)
+    rejected = raw[invalid].copy()
+    rejected.to_csv(ROOT / "data" / "quarantine" / "exports.csv", index=False)
+    rows = raw[~invalid & (raw.Activity == "Exports") & (raw["Mode of Transport"] == "Vessel")].copy()
+    con.register("transactions", rows)
+    con.execute("CREATE OR REPLACE TABLE export_transactions AS SELECT * FROM transactions")
+    monthly = con.execute("""SELECT strftime(date, '%Y-%m') AS month, terminal,
+                              sum(volume_mmcf) AS exports_mmcf
+                              FROM export_transactions GROUP BY month, terminal ORDER BY terminal, month""").df()
+    # Fixed before modeling: long operating history, not chosen by forecast performance.
+    series = monthly[monthly.terminal == "Sabine Pass, LA"].set_index("month").exports_mmcf
+    months = pd.period_range("2017-01", "2026-07", freq="M").astype(str)
+    selected = series.reindex(months)
+    if selected.isna().any() or (selected <= 0).any():
+        raise ValueError("Sabine Pass monthly coverage is incomplete; review the source, do not fill with invented volumes")
+    export_table = selected.rename_axis("month").reset_index()
+    write_parquet(monthly, SILVER / "terminal_exports.parquet")
+    export_table.to_csv(SILVER / "exports.csv", index=False)
+    return {"source_rows": len(raw), "quarantined": int(invalid.sum()), "vessel_export_rows": len(rows),
+            "terminal": "Sabine Pass, LA", "months": len(export_table), "first": months[0], "last": months[-1]}
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--extras", action="store_true", help="Prepare the original supporting EDA datasets")
-    parser.add_argument("--spark", action="store_true", help="Use optional PySpark for sensor preparation")
-    args = parser.parse_args()
     SILVER.mkdir(parents=True, exist_ok=True)
-    GOLD.mkdir(parents=True, exist_ok=True)
-    prepare_sensors = write_sensors_and_alerts_spark if args.spark else write_sensors_and_alerts
-    prepare_sensors(load_tep())
-
-    exports = pd.read_csv(RAW / "lng_exports.csv")
-    if exports.month.duplicated().any() or exports.exports_mmcf.isna().any() or (exports.exports_mmcf <= 0).any():
-        raise ValueError("Expected unique months and positive export volumes")
-    exports = duckdb.sql("SELECT month, exports_mmcf FROM exports ORDER BY month").df()
-    exports.to_csv(SILVER / "exports.csv", index=False)
-    if not args.extras:
-        print(f"Prepared {len(exports):,} export months")
-        return
-    price = pd.read_csv(RAW / "henry_hub.csv")
-    weather = pd.read_csv(RAW / "lake_charles_weather.csv").rename(
-        columns={"DATE": "month", "TAVG": "temp_c"}
-    )
-    weather = weather.dropna(subset=["temp_c"])[["month", "temp_c"]]
-    storms = load_storms()
-    terminals = load_terminals()
-    maintenance = load_maintenance()
-
-    exports.to_csv(SILVER / "exports.csv", index=False)
-    price.to_csv(SILVER / "henry_hub.csv", index=False)
-    weather.to_csv(SILVER / "weather.csv", index=False)
-    storms.to_csv(SILVER / "storms.csv", index=False)
-    terminals.to_csv(SILVER / "terminals.csv", index=False)
-    maintenance.to_csv(GOLD / "maintenance.csv", index=False)
-
-    # DuckDB finds the pandas tables above by their variable names.
-    monthly = duckdb.sql(
-        """
-        SELECT e.month, e.exports_mmcf, p.henry_hub, w.temp_c, s.storms, t.terminal_mmcf
-        FROM exports e
-        JOIN price p USING (month)
-        JOIN weather w USING (month)
-        JOIN storms s USING (month)
-        JOIN terminals t USING (month)
-        ORDER BY e.month
-        """
-    ).df()
-    monthly.to_csv(GOLD / "monthly.csv", index=False)
-
-    gap = duckdb.sql(
-        """
-        SELECT e.month, e.exports_mmcf, t.terminal_mmcf,
-               e.exports_mmcf - t.terminal_mmcf AS gap_mmcf
-        FROM exports e
-        JOIN terminals t USING (month)
-        ORDER BY e.month
-        """
-    ).df()
-    gap.to_csv(GOLD / "volume_gap.csv", index=False)
-
-    print(f"monthly planning rows: {len(monthly)} ({monthly['month'].min()} to {monthly['month'].max()})")
-    print(f"volume gap rows: {len(gap)}")
-    print(f"maintenance months: {len(maintenance)}")
+    (ROOT / "data" / "quarantine").mkdir(parents=True, exist_ok=True)
+    tables, quality = {}, {}
+    for name in SCHEMAS:
+        filename = "maint" if name == "maintenance" else name
+        raw = pd.read_csv(RAW / "pdm" / f"PdM_{filename}.csv")
+        clean, rejected = validate_table(raw, name, tables["machines"].machineID if name != "machines" else None)
+        if clean.empty:
+            raise ValueError(f"No valid {name} rows")
+        rejected.to_csv(ROOT / "data" / "quarantine" / f"{name}.csv", index=False)
+        write_parquet(clean, SILVER / f"{name}.parquet")
+        tables[name] = clean
+        quality[name] = {"raw_rows": len(raw), "valid_rows": len(clean), "quarantined": len(rejected)}
+    building = DATABASE.with_suffix(".building.duckdb")
+    with duckdb.connect(str(building)) as con:
+        con.execute("SET threads=2")
+        for name, frame in tables.items():
+            con.register("source_frame", frame)
+            con.execute(f"CREATE OR REPLACE TABLE {name} AS SELECT * FROM source_frame")
+        features = add_labels(build_features(con), tables["failures"], tables["telemetry"])
+        con.register("feature_frame", features)
+        con.execute("CREATE OR REPLACE TABLE features AS SELECT * FROM feature_frame")
+        write_parquet(features, SILVER / "features.parquet")
+        quality["exports"] = prepare_exports(con)
+    building.replace(DATABASE)
+    quality["features"] = {"rows": len(features), "labeled": int(features.failure_24h.notna().sum()),
+                           "features": len(features.columns) - 4, "decision_interval_hours": 6}
+    quality["manifest_sha256"] = file_hash(RAW / "manifest.json")
+    write_json(GOLD / "quality.json", quality)
+    print(json.dumps(quality, indent=2))
 
 
 if __name__ == "__main__":

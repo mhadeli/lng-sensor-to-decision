@@ -1,135 +1,102 @@
-# LNG: from data to decisions
+# Equipment reliability and LNG terminal planning — runs locally
 
-A data science portfolio built around two operational questions: **which process readings deserve investigation, and how accurately can next month’s LNG exports be forecast?** The dashboard explains the results for an operations audience, with technical details available on demand.
+A complete laptop-based data science workflow for a senior data scientist portfolio: ingest operational tables, validate and join them with SQL, predict failures, evaluate a bounded review queue, replay historical inputs through a saved model, and explain results in a simple dashboard. A separate terminal-export forecast supplies real LNG context.
 
-This project supports my application for a senior data scientist role. [jd.md](jd.md) describes the role; [data_usage.md](data_usage.md) records the original research and proposed plant architecture. The implementation uses public stand-ins, not company operating data.
+**No Azure account, Java, paid services or server is required.** Python, DuckDB and Parquet provide the local implementation. [jd.md](jd.md) is the target role; [docs/pilot_plan.md](docs/pilot_plan.md) maps the implemented workflow to its lifecycle and platform requirements without claiming cloud deployment.
 
-## View and run
-
-Generate and open `site/index.html`. The page bundles Plotly locally and works without a CDN. The existing GitHub Pages destination is https://mhadeli.github.io/lng-sensor-to-decision/; local changes appear there only after deployment.
+## Run and view
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python download.py       # Tennessee Eastman simulation + monthly EIA LNG exports
-python prepare.py        # Validate inputs, build model-ready tables with pandas / SQL
-python model.py          # Validate settings, refit, evaluate baseline / MLP / XGBoost
-python -m unittest discover -s tests -v
-python dashboard.py      # Generate site/index.html + plotly.min.js
+python pipeline.py
 ```
 
-On macOS, XGBoost needs the OpenMP runtime (`brew install libomp` if Homebrew is available). This workspace’s XGBoost library has been linked to the OpenMP runtime already bundled with scikit-learn; reinstalling XGBoost may require restoring that runtime linkage or installing libomp.
+Open **`site/index.html`**. Charts, styling and the replay are bundled locally. Share the whole `site/` folder for an offline demonstration. The existing GitHub Pages destination is https://mhadeli.github.io/lng-sensor-to-decision/; local edits become public only after a push and successful deployment.
 
-Downloads use cached raw files by default. `python download.py --refresh` refreshes EIA exports and regenerates its CSV. GitHub Actions runs this core workflow on pushes to `main`, monthly, or on demand; a failing build prevents deployment.
+After the first download:
 
-## A smaller workflow
-
-```text
-Public source files → validated tables → causal features → three approaches
-                                            ↓
-                              validation chooses settings
-                                            ↓
-                       separate test evaluation → dashboard
+```bash
+python pipeline.py --offline
 ```
 
-| Question | Baseline | MLP | XGBoost |
-|---|---|---|---|
-| Detect abnormal sensor readings | Any sensor beyond its normal mean ± 3 standard deviations | Regularized 64 → 32 network | Shallow boosted trees |
-| Forecast monthly U.S. LNG exports | Last month’s daily export rate × next month’s days | Small regularized 8-unit network | Shallow boosted trees |
+This verifies cached source checksums and rebuilds the entire project. Per-stage logs and run audits are stored in `data/runs/`; `data/gold/latest_run.json` points to the latest successful execution. The dashboard is generated only after the tests pass. On this Mac, XGBoost is already linked to scikit-learn's bundled OpenMP runtime; a fresh macOS environment needs `libomp` (typically `brew install libomp`).
 
-Removed the Random Forest variants, hand-set “calibration,” and competing forecast heuristics from the core comparison. Only the two necessary datasets run by default. The original supporting EDA sources remain available with `python download.py --extras` and `python prepare.py --extras`.
+## What I implemented
 
-Optional Spark demonstration: install `requirements-spark.txt` and Java, then run `python prepare.py --spark`. The default workflow needs no Java. The original `eda.ipynb` is an exploratory archive: its old model outputs are not the current evaluation; use `model.py` and the regenerated dashboard for results.
-
-## What I did, step by step
-
-1. **Ingest:** `download.py` acquires the Tennessee Eastman ZIP and EIA monthly export workbook, keeps raw source files, extracts sensor runs, and writes a consistent monthly CSV. Cached data supports repeatable local builds; `--refresh` updates the export source.
-2. **Preprocess:** `prepare.py` checks sensor completeness and duplicate run steps, assigns fault labels, validates positive monthly volumes, and orders monthly data with DuckDB SQL. Model preparation rejects missing months. Sensor runs and national export data remain separate datasets.
-3. **Engineer features:** `model.py` builds run-local sensor changes and trailing means, fits a normal-operation reference inside each fit, and adds deviation magnitudes. Export features use month length, lagged growth, and past-only seasonal history.
-4. **Model and validate:** compare a baseline, MLP, and XGBoost with a small validation search. Refit with the chosen settings, then evaluate separate sensor runs and 24 months of walk-forward forecasts.
-5. **Evaluate operational relevance:** `evaluation.py` measures confirmed event detection, delay, and false-alert episodes from saved predictions using one fixed policy. It does not retune models or thresholds. Run `python evaluation.py` to refresh this analysis without retraining; `model.py` also generates it automatically.
-6. **Communicate and maintain:** `dashboard.py` presents the recommendation, trade-offs, workflow, and proposed pilot. Automated tests verify causality and evaluation calculations before the scheduled CI deployment.
-
-## Evaluation design
-
-**Sensor detection.** Tennessee Eastman provides 52 process signals across normal operation and 21 fault scenarios. Training faults are active from the beginning; test faults activate at zero-based step 160. Features use current levels, one-step changes, and trailing five-reading means, resetting at run boundaries. Learned models scale features against normal training observations and include absolute deviation magnitudes. Class weights address the fault-heavy training mix. Scores use a causal five-reading average; this may delay detection and is not probability calibration.
-
-Within each training run, the first 75% supplies fitting data and the last 25% supplies validation, separated by a five-reading purge. Three regularization/depth settings and thresholds from 0.20 to 0.80 are compared by balanced accuracy. A normal reference is fitted separately inside each model fit. After selection, each model refits on the complete training archive. The selected approach and its threshold are fixed before scoring the separate test runs in each build.
-
-**Export forecasting.** The baseline adjusts for month length. Learned models predict the next change in daily rate from calendar seasonality, lagged growth, and historical seasonal changes. Each row’s seasonal feature uses only earlier years—training targets cannot contribute to their own feature. Models train on observations from 2019 onward. A 12-month walk-forward validation period precedes the final 24-month backtest; three settings per model are compared by mean absolute error. Settings and the headline approach are frozen before the test period. Models refit each month using only preceding observations.
-
-**Limits.** The benchmark test data has been examined during project development; it is not an untouched prospective trial. Sensor validation has only 125 normal readings from one normal run, and neighboring readings are correlated. Training and testing cover the same fault scenarios, so performance on novel faults is unknown. Scores and thresholds need recalibration on independent operating history. The forecast uses revised EIA data and assumes the prior month’s volume is available; release delays and historical data vintages are not reconstructed. Neither task demonstrates reduced downtime, safety risk, or operating cost at a real facility.
-
-## Current local results
-
-Snapshot from the current data rebuild (export holdout August 2024–July 2026). The dashboard always calculates its numbers from the newly generated artifacts.
-
-| Detection approach | Abnormal readings detected | Normal readings falsely flagged | Balanced accuracy | ROC-AUC |
-|---|---:|---:|---:|---:|
-| Baseline | 79.3% | 18.2% | 80.5% | — |
-| MLP — selected on validation | 61.2% | 0.2% | 80.5% | 0.904 |
-| XGBoost | 71.8% | 8.8% | 81.5% | 0.903 |
-
-**Recommendation: retain existing approved operational rules during a pilot.** The validation-selected MLP is a research candidate, not an approved replacement. It greatly reduces false flags, **but misses more abnormal readings**. It does not beat the baseline on every criterion. XGBoost has the highest test balanced accuracy, but we do not switch the selected approach after seeing the test. This is a decision-support demonstration; operators would need to agree on an acceptable missed-event / false-alarm trade-off before deployment.
-
-### Event-level results and alert burden
-
-The same fixed policy requires three consecutive flagged readings to confirm a new alert. A fault event is a contiguous fault-labelled interval within a run. Detection requires an alert that starts during the event and confirms before it ends; an alert already active before onset is not credited. Delay is measured from event onset to the third flagged reading, at three minutes per step. A clear reading resets an episode.
-
-| Approach | Events flagged within 30 minutes | Median delay, detected events only | False alerts per 24 normal hours | Never flagged |
-|---|---:|---:|---:|---:|
-| Baseline | 10 / 21 | 36 min | 7.78 | 0 |
-| MLP | 7 / 21 | 105 min | 0.22 | 0 |
-| XGBoost | 9 / 21 | 60 min | 3.22 | 0 |
-
-All methods eventually flag all events over the long simulated runs, but eventual detection is not timely intervention. The MLP's low alert burden comes with slower detection. The 30-minute window is an illustrative analysis target, not an approved operating requirement. These descriptive results do not change model selection or establish incident prevention.
-
-False-alert episodes have their first three readings entirely in normal operation. Rates aggregate 216 normal simulation hours across runs, then scale to 24 hours; they are not observed calendar-day workloads. Undetected events are excluded from the median delay and reported separately. There is no acknowledgement or operator-response history.
-
-| Forecast approach | Average absolute error | Average percentage error |
-|---|---:|---:|
-| Day-adjusted baseline | 21.37 Bcf | 4.58% |
-| MLP | 19.34 Bcf | 4.11% |
-| XGBoost — selected on validation | 19.53 Bcf | 4.28% |
-
-XGBoost reduces forecast error by **8.6%** against the day-adjusted baseline. MLP has the lowest test error, but XGBoost won the earlier validation period. A smaller model set and honest selection are more useful than presenting whichever test result happens to look best.
-
-## Outputs and checks
-
-`data/gold/` contains:
-
-- `fault_predictions.csv`: test labels, binary predictions, and uncalibrated model scores.
-- `fault_events.csv`: one row per model and fault event, with confirmation delay and timely-detection flags.
-- `fault_run_alerts.csv`: normal exposure and false-alert episode counts by run and model.
-- `fault_operations.json`: fixed alert-policy definitions and aggregate event / burden metrics.
-- `feature_importance.csv`: XGBoost importance aggregated by sensor; not a causal explanation.
-- `volume_forecast.csv`: 24 months of actual volumes and the three forecasts, in million cubic feet.
-- `evaluation.json`: validation scores, selected settings / thresholds, test periods, and final metrics.
-- `alerts.csv`: baseline sensor flags from preparation.
-
-Old CSVs from earlier runs can remain in an existing data directory; the new dashboard reads only the current artifacts listed above. Raw data, generated outputs, and the local site are ignored by git; the source pipeline regenerates them.
-
-Tests check causal feature construction, run-boundary resets, missing-month rejection, validation-based model selection, and agreement between saved predictions and displayed metrics. The CI build runs these checks before generating and publishing the dashboard.
-
-## How this translates to plant work
-
-Start with operations: define the decision owner, actionable fault labels, forecast horizon, and acceptable alert burden. Connect historian readings to train status and maintenance events; connect forecasts to feed-gas constraints, availability, outages, and cargo schedules. Validate on later periods and separate trains, measure detection delay and incident-level outcomes, and run alongside existing processes before rollout.
-
-The local architecture demonstrates Python, SQL, feature engineering, model evaluation, reproducibility, and stakeholder communication. A proposed Azure implementation would use Data Factory ingestion, Data Lake storage, and Databricks preparation / scoring, with governed outputs and drift monitoring. Those integrations are proposed, not implemented here.
-
-## Proposed pilot and acceptance gates
-
-These are proposed next steps, not implemented plant integrations. Start with one train; agree on duration and staffing after checking data access, event frequency, and engineering review availability.
-
-| Stage | Accountable partners | Gate before continuing |
+| Step | Code | Output |
 |---|---|---|
-| Define the decision | Operations lead, reliability engineer, production planner | Approve actionable event definitions, maximum acceptable delay, missed-event tolerance, false-alert burden, forecast target and horizon before model selection. |
-| Establish data readiness | Data engineering and data science | Align timestamps, train IDs, units, available-at times and quality flags; resolve critical missing inputs and agree on freshness limits. |
-| Validate offline | Data scientist and reliability engineer | Meet approved detection criteria on later periods and separate trains; reduce alert burden without unacceptable delay. Forecasts must improve on the existing planning baseline. |
-| Run a shadow pilot | Operations owner and planner | Review candidate outputs alongside existing processes through representative operating modes; document useful alerts, misses, response times and forecast error before approving expansion. |
-| Maintain and review | Data science and IT | Monitor freshness, missingness, operating-mode changes, drift, alert rate, delayed outcomes and forecast error. Route breaches to the owner and review before retraining or promotion. |
+| Ingest | `download.py` | Five machine CSVs, DOE workbook, source manifest and checksums |
+| Validate and join | `prepare.py`, `sql/features.sql` | Quarantine records, clean Parquet tables, local DuckDB warehouse, causal feature table |
+| Train and evaluate | `model.py`, `evaluation.py` | Baseline / MLP / XGBoost, validation search, saved model registry, event and alert metrics |
+| Forecast exports | `forecasting.py` | Reporting-aware walk-forward forecasts for Sabine Pass |
+| Replay scoring | `replay.py` | Time-filtered historical batches, review requests and monitoring logs |
+| Check and present | `tests/`, `dashboard.py`, `templates/`, `assets/` | Automated checks and an offline interactive dashboard |
+| Orchestrate | `pipeline.py` | One command, stage logs and a run audit |
 
-**Fallback:** keep approved plant alerts and the established planning process. Suppress candidate outputs when critical inputs are stale or missing and show the last successful run. Version data, features, thresholds, and evaluation artifacts for review and rollback. Candidate scores never change control setpoints.
+The default pipeline deliberately uses two independent demonstrations. Simulated equipment failures are never joined to real terminal exports. The obsolete Tennessee Eastman notebook, Spark requirements and generated analysis outputs have been removed; the earlier implementation remains available in git history. `data_usage.md` and `jd.md` are retained as research references. Original cached source files are preserved but only the sources in the current manifest are consumed.
 
-**Plant forecasting adaptation:** the current national export target is not plant production. Agree on daily LNG rundown per train in plant units such as tonnes per day, and a forecast cutoff. Combine historian production with availability, operating mode, feed-gas supply / quality, ambient conditions, and planned maintenance. Include cargo schedules when forecasting shipments or inventory; use schedule versions available at the cutoff. Rebuild a baseline from the last comparable operating period, then evaluate all three approaches on future periods and held-out trains, including outages and ramp-ups. Do not directly convert national export forecasts into plant production estimates.
+The dashboard footer links to `build_metadata.json`, which records its build time and source revision. GitHub Pages builds use the deployed commit SHA so the online version can be checked against the repository.
+
+## Public data
+
+- **Microsoft predictive maintenance:** 876,100 hourly sensor records for 100 simulated machines, plus errors, component replacements, failures and machine metadata. The shared machine IDs allow meaningful operational joins. [Data files](https://github.com/microsoft/sqlworkshops/tree/master/SQLServerAndAzureMachineLearning/ML%20Services%20for%20SQL%20Server/data)
+- **DOE LNG export details:** a pinned September 2026 workbook covering January 2016–July 2026. Retain domestic LNG exports by vessel and aggregate Sabine Pass transactions from January 2017 onward. Preserve split cargo allocations; don't assume each source row is a complete vessel shipment. [Source report](https://www.energy.gov/hgeo/articles/natural-gas-imports-and-exports-monthly-2026)
+
+A normal run uses cached files. `python download.py --refresh` checks the pinned sources and stops if content changed rather than silently accepting revisions. Updating the DOE vintage requires reviewing and versioning the source and its coverage, not simply rerunning on a schedule.
+
+## Maintenance problem and evaluation
+
+**Decision:** which machines should an engineer review because a component may fail in the next 24 hours?
+
+At six-hour decision times, use the preceding 24 hours of sensor means/variability and error counts, equipment age/model, and time since past component replacement. Current and future sensor measurements are excluded from the feature window. Future failures create labels only. Require complete history and a complete future observation window before using a row for training/evaluation.
+
+Use January–August 2015 for training, September–October for validation, and November–December for testing. Purge overlapping 24-hour target windows across splits. Every fifth machine ID is excluded from all fitting and tuning, then tested separately. Only 26 features enter the models; machine identifiers and timestamps do not.
+
+Compare a normal-reference rule, a regularized MLP (16 → 8), and shallow XGBoost. Select model settings and thresholds by validation incident recall subject to an illustrative limit of two false reviews per 100 machine-days. Emit at most one review per machine every 24 hours. Simultaneous component failures count as one incident; evaluate only incidents with four preceding six-hour opportunities. Lead-time medians exclude missed incidents, which remain in the event-recall denominator.
+
+The dashboard distinguishes later-period tests on known machines from tests on unseen machines. Model scores are not calibrated probabilities. Excellent performance on this simulated data is not evidence of effectiveness on real LNG equipment. [Full model card](docs/model_card.md)
+
+## Terminal planning problem and evaluation
+
+Forecast monthly vessel exports from **Sabine Pass, LA**, selected for its long history before modeling. This is shipped gas volume, not plant production or production efficiency.
+
+The baseline carries the latest available daily rate into the target month's calendar. MLP and XGBoost use seasonality and lagged growth. At target month t, both features and training targets stop at t−3 to approximate public reporting delay. A 12-month walk-forward validation period selects settings before the 24-month test. This fixed lag does not reconstruct historical publication dates or revisions; the backtest uses the pinned revised workbook.
+
+## Current local result snapshot
+
+Maintenance candidate selected on validation: **XGBoost**. Later-period test on **20 unseen machines**:
+
+| Method | Eligible incidents warned | Median lead, warned only | False reviews / 100 machine-days |
+|---|---:|---:|---:|
+| Rule baseline | 14 / 22 | 21 h | 5.32 |
+| MLP | 22 / 22 | 18 h | 1.83 |
+| XGBoost | 22 / 22 | 24 h | 0.33 |
+
+The small incident count and synthetic source limit the conclusion. The model remains a research candidate; a plant pilot needs independent labels and agreed acceptance criteria.
+
+Sabine Pass backtest, August 2024–July 2026:
+
+| Method | Average absolute error | Average percentage error |
+|---|---:|---:|
+| Daily-rate baseline | 12.03 Bcf | 10.39% |
+| MLP | 13.91 Bcf | 11.77% |
+| XGBoost — selected on validation | 6.24 Bcf | 5.57% |
+
+XGBoost's average error is about 48% lower than this reporting-aware baseline. These numbers describe the pinned dataset; the dashboard always derives metrics from generated artifacts.
+
+## Replay and monitoring
+
+`python replay.py` reloads the registered model and reconstructs features for a held-out historical week, one six-hour batch at a time. Scoring reads telemetry, errors, maintenance and machine metadata only; it does not read future failure outcomes. A selected historical period determines the replay window, not the recommendations.
+
+The dashboard slider displays the precomputed batches. Missing/stale sensor history suppresses a score. Logs include scored/suppressed counts, emitted reviews, and feature-mean shifts relative to the training reference. This lightweight shift check is diagnostic, not a validated production drift test. A 24-hour cooldown limits duplicate requests. Tests compare replay outputs against offline scores.
+
+## Evidence beyond model accuracy
+
+- [Data contract](docs/data_contract.md): table keys, quality rules, available-at assumptions, features and labels.
+- [Model card](docs/model_card.md): selection policy, holdouts, metrics and limitations.
+- [Runbook](docs/runbook.md): reproducibility, warehouse inspection, demonstration and recovery.
+- [Pilot plan](docs/pilot_plan.md): owners, dependencies, acceptance gates, fallback and a mentoring/handoff exercise.
+
+The local implementation demonstrates Python/SQL, ETL requirements, future-event modeling, testing, maintainability and stakeholder communication. Azure Data Factory, Data Lake and Databricks are documented future counterparts, not tools claimed to be running here. GitHub Actions runs the same local workflow on pushes and manual triggers; only a successful build is deployed.

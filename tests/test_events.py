@@ -1,64 +1,46 @@
-"""Small known timelines verify event boundaries, confirmation delay, and burden."""
+"""Hand-built timelines verify warning lead time, future labels, and review workload."""
 import unittest
 
 import pandas as pd
 
-from evaluation import operational_metrics
+from evaluation import evaluate, review_alerts, selection_key
 
 
-class EventEvaluation(unittest.TestCase):
-    def evaluate(self, actual, flags, run_id=1):
-        frame = pd.DataFrame({"fault_id": run_id, "step": range(len(actual)),
-                              "is_fault": actual, "baseline_predicted": flags})
-        return operational_metrics(frame, models=("baseline",))
+class AlertEvaluation(unittest.TestCase):
+    def frame(self, scores):
+        return pd.DataFrame({"machineID": 1, "datetime": pd.date_range("2015-11-01", periods=len(scores), freq="6h"),
+                             "failure_24h": [0] * len(scores), "score": scores})
 
-    def test_confirmation_delay_and_false_episode_rate(self):
-        report, events, _ = self.evaluate([0] * 6 + [1] * 6, [1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0])
-        metric = report["models"]["baseline"]
-        self.assertEqual(events.iloc[0].delay_minutes, 9)
-        self.assertEqual(metric["events_within_30_min"], 1)
-        self.assertEqual(metric["false_alert_episodes"], 1)
-        self.assertAlmostEqual(metric["false_alerts_per_24_normal_hours"], 80)
+    def test_cooldown_is_machine_local_and_never_reads_labels(self):
+        frame = self.frame([1] * 9)
+        alerts = review_alerts(frame, .5)
+        self.assertEqual(list(alerts.datetime), list(frame.datetime.iloc[[0, 4, 8]]))
+        frame.failure_24h = 1
+        pd.testing.assert_frame_equal(alerts, review_alerts(frame, .5))
+        combined = pd.concat([frame, frame.assign(machineID=2)])
+        self.assertEqual(len(review_alerts(combined, .5)), 6)
 
-    def test_carryover_alert_and_brief_flags_do_not_detect_event(self):
-        report, events, _ = self.evaluate([0, 0, 0, 1, 1, 1, 1, 1], [1, 1, 1, 1, 0, 1, 1, 0])
-        metric = report["models"]["baseline"]
+    def test_future_warning_and_false_alert(self):
+        frame = self.frame([1, 0, 0, 0, 1, 0, 0, 0])
+        frame.loc[:3, "failure_24h"] = 1
+        failures = pd.DataFrame({"machineID": [1], "datetime": [pd.Timestamp("2015-11-02")]})
+        metric, alerts, events = evaluate(frame, failures, .5)
+        self.assertEqual(metric["warned_events"], 1)
+        self.assertEqual(metric["median_lead_hours"], 24)
+        self.assertEqual(metric["false_alerts"], 1)  # Alert at the failure instant is not advance warning.
+        self.assertEqual(metric["false_alerts_per_100_machine_days"], 50)
+        self.assertTrue(events.iloc[0].warned)
+
+    def test_incomplete_event_window_excluded_and_miss_has_no_lead_time(self):
+        frame = self.frame([0] * 8)
+        failures = pd.DataFrame({"machineID": [1, 1],
+                                "datetime": pd.to_datetime(["2015-11-01 06:00", "2015-11-02 00:00"])})
+        metric, _, events = evaluate(frame, failures, .5)
+        self.assertEqual(metric["events"], 1)
         self.assertEqual(metric["missed_events"], 1)
-        self.assertIsNone(metric["median_delay_minutes_detected_only"])
-        self.assertIsNone(events.iloc[0].delay_minutes)
-        self.assertEqual(metric["false_alert_episodes"], 1)
+        self.assertIsNone(metric["median_lead_hours"])
 
-    def test_confirmation_after_event_ends_is_not_detection(self):
-        report, _, _ = self.evaluate([0, 1, 1, 0, 0], [0, 1, 1, 1, 0])
-        self.assertEqual(report["models"]["baseline"]["detected_events"], 0)
-
-    def test_detection_window_boundary_and_missed_events(self):
-        # At step 10, confirmation is exactly 30 minutes after onset.
-        report, events, _ = self.evaluate([1] * 12 + [0] + [1] * 3, [0] * 8 + [1] * 4 + [0] * 4)
-        metric = report["models"]["baseline"]
-        self.assertEqual(metric["events"], 2)
-        self.assertEqual(metric["events_within_30_min"], 1)
-        self.assertEqual(metric["missed_events"], 1)
-        self.assertEqual(metric["median_delay_minutes_detected_only"], 30)
-        self.assertTrue(pd.isna(events.iloc[1].delay_minutes))
-        late, _, _ = self.evaluate([1] * 15, [0] * 9 + [1] * 6)
-        self.assertEqual(late["models"]["baseline"]["events_within_30_min"], 0)
-        self.assertIsNone(late["models"]["baseline"]["false_alerts_per_24_normal_hours"])
-
-    def test_normal_only_run_and_episode_boundaries(self):
-        frame = pd.DataFrame({"fault_id": [0] * 4 + [1] * 4, "step": list(range(4)) * 2,
-                              "is_fault": [0] * 8, "baseline_predicted": [0, 0, 1, 1, 1, 1, 0, 0]})
-        report, events, _ = operational_metrics(frame, models=("baseline",))
-        self.assertTrue(events.empty)
-        self.assertEqual(report["models"]["baseline"]["false_alert_episodes"], 0)
-        self.assertEqual(report["models"]["baseline"]["events"], 0)
-
-    def test_missing_steps_rejected(self):
-        frame = pd.DataFrame({"fault_id": [1, 1], "step": [0, 2], "is_fault": [0, 1],
-                              "baseline_predicted": [0, 1]})
-        with self.assertRaises(ValueError):
-            operational_metrics(frame, models=("baseline",))
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_budget_takes_priority_over_recall(self):
+        affordable = {"false_alerts_per_100_machine_days": 1.5, "event_recall": .7}
+        noisy = {"false_alerts_per_100_machine_days": 5, "event_recall": 1}
+        self.assertGreater(selection_key(affordable), selection_key(noisy))

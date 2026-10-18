@@ -1,86 +1,66 @@
-"""Evaluate fixed alert policies on saved predictions, without retraining or tuning."""
-import json
-from pathlib import Path
-
-import numpy as np
+"""Translate six-hour failure scores into a bounded maintenance review workload."""
 import pandas as pd
+from sklearn.metrics import average_precision_score, precision_score, recall_score
 
-ROOT = Path(__file__).resolve().parent
-MODELS = ("baseline", "mlp", "xgboost")
-STEP_MINUTES = 3
-PERSISTENCE = 3
-DETECTION_WINDOW_MINUTES = 30
-
-
-def operational_metrics(predictions, models=MODELS):
-    """A new alert needs three consecutive flags; confirm at the third reading.
-
-    An event is a contiguous fault-labelled interval in one run. Only alerts
-    starting within that event count as detections. Existing pre-fault alerts
-    cannot claim a detection. All runs must have consecutive integer steps.
-    """
-    required = ["fault_id", "step", "is_fault"] + [f"{m}_predicted" for m in models]
-    if predictions.empty or predictions[required].isna().any().any():
-        raise ValueError("Complete, nonempty predictions are required")
-    if predictions.duplicated(["fault_id", "step"]).any():
-        raise ValueError("Duplicate run steps")
-    if not predictions[["is_fault"] + required[3:]].isin([0, 1]).all().all():
-        raise ValueError("Labels and predictions must be binary")
-    event_rows, run_rows = [], []
-    for run_id, run in predictions.groupby("fault_id", sort=True):
-        run = run.sort_values("step").reset_index(drop=True)
-        steps = run.step.to_numpy()
-        if not np.equal(steps, steps.astype(int)).all() or not np.equal(np.diff(steps), 1).all():
-            raise ValueError("Run steps must be consecutive integers")
-        actual = run.is_fault.to_numpy().astype(bool)
-        starts = np.flatnonzero(actual & ~np.r_[False, actual[:-1]])
-        ends = np.flatnonzero(actual & ~np.r_[actual[1:], False])
-        normal_hours = float((~actual).sum() * STEP_MINUTES / 60)
-        for model in models:
-            flags = run[f"{model}_predicted"].to_numpy().astype(bool)
-            alarm_starts = np.flatnonzero(flags & ~np.r_[False, flags[:-1]])
-            alarm_ends = np.flatnonzero(flags & ~np.r_[flags[1:], False])
-            episodes = [(int(a), int(a + PERSISTENCE - 1))
-                        for a, b in zip(alarm_starts, alarm_ends) if b - a + 1 >= PERSISTENCE]
-            false_episodes = sum(not actual[a:c + 1].any() for a, c in episodes)
-            run_rows.append({"model": model, "fault_id": int(run_id),
-                             "normal_hours": normal_hours, "false_alert_episodes": int(false_episodes)})
-            for number, (start, end) in enumerate(zip(starts, ends), start=1):
-                confirmations = [c for a, c in episodes if a >= start and c <= end]
-                delay = int((steps[min(confirmations)] - steps[start]) * STEP_MINUTES) if confirmations else None
-                event_rows.append({"model": model, "fault_id": int(run_id), "event": number,
-                                   "start_step": int(steps[start]), "end_step": int(steps[end]),
-                                   "detected": delay is not None,
-                                   "detected_within_30_min": delay is not None and delay <= DETECTION_WINDOW_MINUTES,
-                                   "delay_minutes": delay})
-    events = pd.DataFrame(event_rows, columns=["model", "fault_id", "event", "start_step", "end_step",
-                                              "detected", "detected_within_30_min", "delay_minutes"])
-    runs = pd.DataFrame(run_rows)
-    summary = {}
-    for model in models:
-        subset, run_subset = events[events.model == model], runs[runs.model == model]
-        detected = subset[subset.detected.astype(bool)]
-        normal_hours = float(run_subset.normal_hours.sum())
-        count = int(run_subset.false_alert_episodes.sum())
-        summary[model] = {"events": len(subset), "detected_events": len(detected),
-                          "events_within_30_min": int(subset.detected_within_30_min.sum()),
-                          "missed_events": len(subset) - len(detected),
-                          "median_delay_minutes_detected_only": float(detected.delay_minutes.median()) if len(detected) else None,
-                          "normal_hours": normal_hours, "false_alert_episodes": count,
-                          "false_alerts_per_24_normal_hours": count * 24 / normal_hours if normal_hours else None}
-    return {"step_minutes": STEP_MINUTES, "consecutive_flags": PERSISTENCE,
-            "detection_window_minutes": DETECTION_WINDOW_MINUTES, "models": summary}, events, runs
+HORIZON_HOURS = 24
+REVIEW_COOLDOWN_HOURS = 24
+FALSE_ALERT_BUDGET = 2.0  # Illustrative target per 100 observed machine-days, set before testing.
 
 
-def write_operational_evaluation(predictions, destination):
-    summary, events, runs = operational_metrics(predictions)
-    destination.mkdir(parents=True, exist_ok=True)
-    events.to_csv(destination / "fault_events.csv", index=False)
-    runs.to_csv(destination / "fault_run_alerts.csv", index=False)
-    (destination / "fault_operations.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n")
-    return summary
+def review_alerts(predictions, threshold):
+    """At most one emitted review per machine per 24 hours, using scores only."""
+    emitted = []
+    for _, group in predictions.groupby("machineID"):
+        last = None
+        for row in group.sort_values("datetime").itertuples():
+            if row.score >= threshold and (last is None or row.datetime - last >= pd.Timedelta(hours=24)):
+                emitted.append({"machineID": row.machineID, "datetime": row.datetime, "score": row.score})
+                last = row.datetime
+    return pd.DataFrame(emitted, columns=["machineID", "datetime", "score"])
 
 
-if __name__ == "__main__":
-    gold = ROOT / "data" / "gold"
-    print(json.dumps(write_operational_evaluation(pd.read_csv(gold / "fault_predictions.csv"), gold), indent=2))
+def evaluate(predictions, failures, threshold):
+    alerts = review_alerts(predictions, threshold)
+    incidents = failures[["machineID", "datetime"]].drop_duplicates()
+    alerts["followed_by_failure"] = False
+    events = []
+    for machine, group in predictions.groupby("machineID"):
+        times = group.datetime.sort_values()
+        fail_times = incidents.loc[incidents.machineID == machine, "datetime"].sort_values()
+        machine_alerts = alerts[alerts.machineID == machine]
+        for row in machine_alerts.itertuples():
+            hit = ((fail_times > row.datetime) & (fail_times <= row.datetime + pd.Timedelta(hours=24))).any()
+            alerts.loc[row.Index, "followed_by_failure"] = bool(hit)
+        for failure in fail_times:
+            opportunities = times[(times >= failure - pd.Timedelta(hours=24)) & (times < failure)]
+            # Four six-hour decisions ensure a complete lookback; boundary incidents are excluded.
+            if len(opportunities) != 4:
+                continue
+            warning = machine_alerts[(machine_alerts.datetime >= failure - pd.Timedelta(hours=24)) &
+                                     (machine_alerts.datetime < failure)]
+            lead = float((failure - warning.datetime.min()).total_seconds() / 3600) if len(warning) else None
+            events.append({"machineID": int(machine), "failure_time": failure,
+                           "warned": bool(len(warning)), "lead_hours": lead})
+    events = pd.DataFrame(events, columns=["machineID", "failure_time", "warned", "lead_hours"])
+    warned = int(events.warned.sum())
+    false_count = int((~alerts.followed_by_failure).sum())
+    machine_days = len(predictions) * 6 / 24
+    actual = predictions.failure_24h.astype(int)
+    metrics = {"rows": len(predictions), "machines": int(predictions.machineID.nunique()),
+               "events": len(events), "warned_events": warned, "missed_events": len(events) - warned,
+               "event_recall": warned / len(events) if len(events) else 0.0,
+               "median_lead_hours": float(events.lead_hours.dropna().median()) if warned else None,
+               "alerts": len(alerts), "false_alerts": false_count,
+               "machine_days": machine_days,
+               "false_alerts_per_100_machine_days": false_count * 100 / machine_days if machine_days else 0.0,
+               "average_precision": float(average_precision_score(actual, predictions.score)) if actual.sum() else 0.0,
+               "reading_recall": float(recall_score(actual, predictions.score >= threshold, zero_division=0)),
+               "reading_precision": float(precision_score(actual, predictions.score >= threshold, zero_division=0))}
+    return metrics, alerts, events
+
+
+def selection_key(metrics):
+    within_budget = metrics["false_alerts_per_100_machine_days"] <= FALSE_ALERT_BUDGET
+    if within_budget:
+        return (1, metrics["event_recall"], -metrics["false_alerts_per_100_machine_days"])
+    return (0, -metrics["false_alerts_per_100_machine_days"], metrics["event_recall"])

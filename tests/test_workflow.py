@@ -1,76 +1,115 @@
-"""Guard against temporal leakage and misleading evaluation artifacts."""
+"""Guard against future-data leakage and verify artifacts used by the dashboard."""
 import json
 import unittest
 
+import duckdb
 import numpy as np
 import pandas as pd
 
-from evaluation import operational_metrics
-from model import GOLD, add_changes, export_features, fault_metrics, predict_export
+from common import GOLD, SILVER, read_parquet
+from forecasting import FEATURES, export_features, predict_month
+from model import split_data
+from prepare import add_labels, build_features, validate_table
+from evaluation import evaluate, selection_key
 
 
-class TemporalFeatures(unittest.TestCase):
-    def test_sensor_windows_reset_and_ignore_future(self):
-        raw = pd.DataFrame({"split": ["train"] * 8, "fault_id": [0] * 4 + [1] * 4,
-                            "step": list(range(4)) * 2, "x1": [1, 2, 3, 4, 100, 101, 102, 103]})
-        before, _, _ = add_changes(raw)
-        self.assertEqual(before.loc[4, "dx1"], 0)
-        self.assertEqual(before.loc[4, "m5_x1"], 100)
-        raw.loc[3, "x1"] = 999
-        after, _, _ = add_changes(raw)
-        pd.testing.assert_frame_equal(before.iloc[:3], after.iloc[:3])
-        pd.testing.assert_frame_equal(before.iloc[4:], after.iloc[4:])
-
-    def test_forecast_features_do_not_see_current_or_future_target(self):
-        raw = pd.DataFrame({"month": pd.period_range("2015-01", periods=120, freq="M").astype(str),
-                            "exports_mmcf": 100000 + np.arange(120) * 1200.0})
-        before, columns = export_features(raw)
-        raw.loc[85:, "exports_mmcf"] *= 3
-        after, _ = export_features(raw)
-        pd.testing.assert_frame_equal(before.loc[:85, columns + ["baseline"]],
-                                      after.loc[:85, columns + ["baseline"]])
-        a = predict_export(before, columns, 85, "xgboost", 40)
-        b = predict_export(after, columns, 85, "xgboost", 40)
-        self.assertEqual(a, b)
-
-    def test_missing_month_rejected(self):
-        raw = pd.DataFrame({"month": ["2020-01", "2020-03"], "exports_mmcf": [10, 20]})
-        with self.assertRaises(ValueError):
-            export_features(raw)
+def fixture_tables():
+    times = pd.date_range("2015-01-01", periods=50, freq="h")
+    telemetry = pd.DataFrame({"machineID": 1, "datetime": times,
+                              **{s: np.arange(50) + 100.0 for s in ["volt", "rotate", "pressure", "vibration"]}})
+    return {"telemetry": telemetry, "machines": pd.DataFrame({"machineID": [1], "model": ["model1"], "age": [5]}),
+            "errors": pd.DataFrame({"machineID": [1, 1], "datetime": times[[10, 30]], "errorID": ["error1", "error2"]}),
+            "maintenance": pd.DataFrame({"machineID": [1, 1], "datetime": times[[1, 30]], "comp": ["comp1", "comp2"]})}
 
 
-@unittest.skipUnless((GOLD / "evaluation.json").exists(), "Run model.py for artifact checks")
-class EvaluationArtifacts(unittest.TestCase):
-    def test_headline_model_chosen_from_validation(self):
-        result = json.loads((GOLD / "evaluation.json").read_text())
-        self.assertEqual(result["faults"]["selected"], max(result["faults"]["validation"],
-            key=lambda k: result["faults"]["validation"][k]["balanced_accuracy"]))
-        self.assertEqual(result["exports"]["selected"], min(result["exports"]["validation_mae_bcf"],
-            key=result["exports"]["validation_mae_bcf"].get))
-        self.assertLess(result["exports"]["validation_last"], result["exports"]["test_first"])
+def features_for(tables):
+    with duckdb.connect() as con:
+        for name, frame in tables.items():
+            con.register(name, frame)
+        return build_features(con)
 
-    def test_operational_artifacts_match_saved_predictions(self):
-        predictions = pd.read_csv(GOLD / "fault_predictions.csv")
-        report, events, runs = operational_metrics(predictions)
-        self.assertEqual(report, json.loads((GOLD / "fault_operations.json").read_text()))
-        saved = pd.read_csv(GOLD / "fault_events.csv")
-        pd.testing.assert_frame_equal(events, saved, check_dtype=False)
-        pd.testing.assert_frame_equal(runs, pd.read_csv(GOLD / "fault_run_alerts.csv"), check_dtype=False)
 
-    def test_metrics_match_predictions(self):
-        result = json.loads((GOLD / "evaluation.json").read_text())
-        faults = pd.read_csv(GOLD / "fault_predictions.csv")
-        exports = pd.read_csv(GOLD / "volume_forecast.csv")
-        self.assertFalse(faults.duplicated(["fault_id", "step"]).any())
-        self.assertEqual(len(exports), 24)
+class DataWorkflow(unittest.TestCase):
+    def test_sql_features_exclude_current_and_future_values(self):
+        tables = fixture_tables()
+        before = features_for(tables)
+        target = pd.Timestamp("2015-01-02")
+        row = before[before.datetime == target].iloc[0]
+        self.assertEqual(row.volt_mean, 111.5)
+        self.assertEqual(row.error1_count, 1)
+        self.assertEqual(row.error2_count, 0)
+        self.assertAlmostEqual(row.comp1_days, 23 / 24)
+        self.assertEqual(row.comp2_unknown, 1)
+        tables["telemetry"].loc[tables["telemetry"].datetime >= target, "volt"] = 99999
+        tables["maintenance"].loc[1, "datetime"] = target
+        after = features_for(tables)
+        pd.testing.assert_frame_equal(before[before.datetime <= target], after[after.datetime <= target])
+
+    def test_missing_hour_suppresses_complete_history(self):
+        tables = fixture_tables()
+        tables["telemetry"] = tables["telemetry"].drop(index=10)
+        result = features_for(tables)
+        self.assertNotIn(pd.Timestamp("2015-01-02"), result.datetime.to_list())
+
+    def test_labels_exclude_present_failure_and_unknown_tail(self):
+        tables = fixture_tables()
+        features = features_for(tables)
+        failures = pd.DataFrame({"machineID": [1], "datetime": [pd.Timestamp("2015-01-02 06:00")]})
+        labeled = add_labels(features, failures, tables["telemetry"])
+        self.assertEqual(labeled.iloc[0].failure_24h, 1)
+        self.assertTrue(pd.isna(labeled[labeled.datetime == failures.iloc[0].datetime].iloc[0].failure_24h))
+        self.assertTrue(pd.isna(labeled.iloc[-1].failure_24h))
+
+    def test_invalid_rows_are_quarantined(self):
+        machines = pd.DataFrame({"machineID": [1, 1, 2], "model": ["model1"] * 3, "age": [4, 4, -2]})
+        good, bad = validate_table(machines, "machines")
+        self.assertEqual(len(good), 1)
+        self.assertEqual(len(bad), 2)
+
+    def test_time_purge_and_unseen_machine_split(self):
+        times = pd.date_range("2015-08-30", "2015-11-03", freq="6h")
+        frame = pd.concat([pd.DataFrame({"machineID": machine, "datetime": times, "failure_24h": 0}) for machine in [1, 5]])
+        train, valid, refit, test = split_data(frame)
+        self.assertLess(train.datetime.max() + pd.Timedelta(hours=24), valid.datetime.min())
+        self.assertLess(refit.datetime.max() + pd.Timedelta(hours=24), test.datetime.min())
+        self.assertEqual(set(refit.machineID), {1})
+        self.assertEqual(set(test[test.cohort == "unseen_machines"].machineID), {5})
+
+    def test_forecast_respects_publication_lag_in_features_and_training(self):
+        exports = pd.DataFrame({"month": pd.period_range("2017-01", periods=100, freq="M").astype(str),
+                                "exports_mmcf": 100000 + np.arange(100) * 500.0})
+        before = export_features(exports)
+        exports.loc[78:, "exports_mmcf"] *= 10  # At month 80, only month 77 and earlier are known.
+        after = export_features(exports)
+        pd.testing.assert_frame_equal(before.loc[:80, FEATURES + ["baseline"]], after.loc[:80, FEATURES + ["baseline"]])
+        self.assertEqual(predict_month(before, 80, "xgboost", 40), predict_month(after, 80, "xgboost", 40))
+
+
+@unittest.skipUnless((GOLD / "maintenance_evaluation.json").exists(), "Build pipeline for artifact checks")
+class ArtifactChecks(unittest.TestCase):
+    def test_validation_selection_and_saved_metrics(self):
+        report = json.loads((GOLD / "maintenance_evaluation.json").read_text())
+        self.assertEqual(report["selected"], max(report["validation"], key=lambda k: selection_key(report["validation"][k])))
+        predictions = read_parquet(GOLD / "maintenance_predictions.parquet")
+        failures = read_parquet(SILVER / "failures.parquet")
+        for (model, cohort), group in predictions.groupby(["model", "cohort"]):
+            metrics, _, _ = evaluate(group, failures, report["settings"][model]["threshold"])
+            self.assertEqual(metrics, report["test"][model][cohort])
+
+    def test_replay_scores_match_batch_scores(self):
+        replay = pd.read_csv(GOLD / "replay_scores.csv", parse_dates=["datetime"])
+        selected = json.loads((GOLD / "maintenance_evaluation.json").read_text())["selected"]
+        batch = read_parquet(GOLD / "maintenance_predictions.parquet")
+        joint = replay.merge(batch[batch.model == selected], on=["machineID", "datetime"], suffixes=("_replay", "_batch"))
+        self.assertGreater(len(joint), 0)
+        np.testing.assert_allclose(joint.score_replay, joint.score_batch, rtol=1e-6)
+        alerts = replay[replay.review_requested].sort_values(["machineID", "datetime"])
+        self.assertTrue((alerts.groupby("machineID").datetime.diff().dropna() >= pd.Timedelta(hours=24)).all())
+
+    def test_terminal_metrics_and_availability(self):
+        report = json.loads((GOLD / "forecast_evaluation.json").read_text())
+        forecasts = pd.read_csv(GOLD / "terminal_forecast.csv")
+        self.assertEqual(report["selected"], min(report["validation_mae_bcf"], key=report["validation_mae_bcf"].get))
         for kind in ["baseline", "mlp", "xgboost"]:
-            metric = fault_metrics(faults.is_fault, faults[f"{kind}_predicted"])
-            for key in ["caught", "false_alarm", "balanced_accuracy"]:
-                self.assertAlmostEqual(metric[key], result["faults"]["test"][kind][key])
-            self.assertTrue(np.isfinite(exports[kind]).all())
-            self.assertAlmostEqual((exports[kind] - exports.actual).abs().mean() / 1000,
-                                   result["exports"]["test"][kind]["mae_bcf"])
-
-
-if __name__ == "__main__":
-    unittest.main()
+            self.assertAlmostEqual((forecasts[kind] - forecasts.actual).abs().mean() / 1000, report["test"][kind]["mae_bcf"])
+        self.assertTrue((pd.PeriodIndex(forecasts.month, freq="M") - 3 == pd.PeriodIndex(forecasts.latest_available_month, freq="M")).all())

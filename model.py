@@ -1,222 +1,139 @@
-"""Three models per question; settings chosen before the final holdout is scored."""
+"""Fit three maintenance models; select on earlier months, test once on later months."""
 import json
-from pathlib import Path
+import platform
 
+import joblib
 import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.metrics import balanced_accuracy_score, recall_score, roc_auc_score
-from sklearn.neural_network import MLPClassifier, MLPRegressor
+import sklearn
+import xgboost
+from sklearn.base import BaseEstimator
+from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_sample_weight
 from threadpoolctl import threadpool_limits
-from xgboost import XGBClassifier, XGBRegressor
+from xgboost import XGBClassifier
 
-from evaluation import write_operational_evaluation
+from common import ARTIFACTS, GOLD, MODELS, RAW, ROOT, SILVER, file_hash, read_parquet, write_json, write_parquet
+from evaluation import FALSE_ALERT_BUDGET, evaluate, selection_key
 
-ROOT = Path(__file__).resolve().parent
-SILVER = ROOT / "data" / "silver"
-GOLD = ROOT / "data" / "gold"
-TEST_MONTHS = 24
-VALID_MONTHS = 12
-
-TAGS = (
-    [
-        "A feed", "D feed", "E feed", "A and C feed", "Recycle flow", "Reactor feed rate",
-        "Reactor pressure", "Reactor level", "Reactor temperature", "Purge rate",
-        "Separator temperature", "Separator level", "Separator pressure", "Separator underflow",
-        "Stripper level", "Stripper pressure", "Stripper underflow", "Stripper temperature",
-        "Stripper steam flow", "Compressor work", "Reactor cooling-water outlet temp",
-        "Condenser cooling-water outlet temp",
-    ]
-    + [f"Reactor feed analysis {c}" for c in "ABCDEF"]
-    + [f"Purge gas analysis {c}" for c in "ABCDEFGH"]
-    + [f"Product analysis {c}" for c in "DEFGH"]
-    + [
-        "D feed valve", "E feed valve", "A feed valve", "A and C feed valve",
-        "Compressor recycle valve", "Purge valve", "Separator liquid valve",
-        "Stripper product valve", "Stripper steam valve", "Reactor cooling-water valve",
-        "Condenser cooling-water valve",
-    ]
-)
-TAG_NAMES = {f"x{i}": name for i, name in enumerate(TAGS, start=1)}
+VALID_START = pd.Timestamp("2015-09-01")
+TEST_START = pd.Timestamp("2015-11-01")
+SENSOR_MEANS = [f"{s}_mean" for s in ("volt", "rotate", "pressure", "vibration")]
 
 
-
-def add_changes(sensors):
-    """Causal features; windows reset at each independent run."""
-    sensors = sensors.sort_values(["split", "fault_id", "step"]).reset_index(drop=True)
-    measures = [c for c in sensors if c.startswith("x")]
-    grouped = sensors.groupby(["split", "fault_id"])[measures]
-    changes = grouped.diff().fillna(0).add_prefix("d")
-    means = grouped.transform(lambda x: x.rolling(5, min_periods=1).mean()).add_prefix("m5_")
-    features = measures + list(changes) + list(means)
-    return pd.concat([sensors, changes, means], axis=1), measures, features
-
-
-def smooth(probabilities, frame):
-    return pd.Series(probabilities, index=frame.index).groupby(
-        [frame["split"], frame["fault_id"]]
-    ).transform(lambda x: x.rolling(5, min_periods=1).mean())
-
-
-class NormalReference(TransformerMixin, BaseEstimator):
-    """Express each signal relative to normal operation, including deviation magnitude."""
+class SensorRule(BaseEstimator):
+    """Largest deviation from normal training sensor means; no learned failure model."""
     def fit(self, X, y):
-        self.scaler_ = StandardScaler().fit(X[np.asarray(y) == 0])
+        normal = X.loc[np.asarray(y) == 0, SENSOR_MEANS]
+        self.center_ = normal.mean()
+        self.scale_ = normal.std().replace(0, 1)
         return self
 
-    def transform(self, X):
-        scaled = self.scaler_.transform(X)
-        return np.concatenate([scaled, np.abs(scaled)], axis=1)
+    def score_samples(self, X):
+        return ((X[SENSOR_MEANS] - self.center_) / self.scale_).abs().max(axis=1).to_numpy()
 
 
-def fault_model(kind, setting):
+def make_model(kind, setting):
+    if kind == "baseline":
+        return SensorRule()
     if kind == "mlp":
-        return make_pipeline(NormalReference(), MLPClassifier(
-            hidden_layer_sizes=(64, 32), alpha=setting, max_iter=250,
-            random_state=42, tol=1e-4))
-    return make_pipeline(NormalReference(), XGBClassifier(n_estimators=220, max_depth=setting, learning_rate=0.04,
-                         min_child_weight=5, reg_lambda=10, subsample=0.85,
-                         colsample_bytree=0.85, tree_method="hist", n_jobs=2,
-                         random_state=42))
+        return make_pipeline(StandardScaler(), MLPClassifier(hidden_layer_sizes=(16, 8), alpha=setting,
+            max_iter=120, random_state=42, tol=0.0005))
+    return XGBClassifier(n_estimators=140, max_depth=setting, learning_rate=0.05,
+        min_child_weight=10, reg_lambda=10, n_jobs=2, tree_method="hist", random_state=42)
 
 
-def fit_fault(model, frame, features):
-    weights = compute_sample_weight("balanced", frame["is_fault"])
-    kwargs = {f"{model.steps[-1][0]}__sample_weight": weights}
-    model.fit(frame[features], frame["is_fault"], **kwargs)
+def fit_model(kind, setting, frame, columns):
+    model = make_model(kind, setting)
+    y = frame.failure_24h.astype(int)
+    weights = compute_sample_weight("balanced", y)
+    arguments = {} if kind == "baseline" else {
+        "mlpclassifier__sample_weight" if kind == "mlp" else "sample_weight": weights}
+    model.fit(frame[columns], y, **arguments)
     return model
 
 
-def fault_metrics(actual, prediction, probability=None):
-    return {"caught": float(recall_score(actual, prediction)),
-            "false_alarm": float(1 - recall_score(actual, prediction, pos_label=0)),
-            "balanced_accuracy": float(balanced_accuracy_score(actual, prediction)),
-            "auc": float(roc_auc_score(actual, probability)) if probability is not None else None}
+def score_model(model, frame, columns):
+    if isinstance(model, SensorRule):
+        return model.score_samples(frame[columns])
+    return model.predict_proba(frame[columns])[:, 1]
 
 
-def classify_faults():
-    sensors, measures, features = add_changes(pd.read_csv(SILVER / "sensors.csv"))
-    train = sensors[sensors.split == "train"].copy()
-    test = sensors[sensors.split == "test"].copy()
-    cutoff = train.groupby("fault_id")["step"].transform("max").add(1).mul(0.75).astype(int)
-    fit = train[train.step < cutoff - 5]
-    valid = train[train.step >= cutoff]
-    # A five-reading purge separates fitting and validation windows.
-    normal = train[train.is_fault == 0][measures]
-    baseline = ((test[measures] - normal.mean()).abs() > 3 * normal.std()).any(axis=1).astype(int)
-    normal_fit = fit[fit.is_fault == 0][measures]
-    baseline_valid = ((valid[measures] - normal_fit.mean()).abs() > 3 * normal_fit.std()).any(axis=1).astype(int)
-    result = test[["fault_id", "step", "is_fault"]].copy()
-    result["baseline_predicted"] = baseline
-    validation = {"baseline": fault_metrics(valid.is_fault, baseline_valid)}
-    selection = {}
-    for kind, settings in [("mlp", [1.0, 8.0, 30.0]), ("xgboost", [2, 4, 6])]:
-        candidates = []
-        for setting in settings:
-            model = fit_fault(fault_model(kind, setting), fit, features)
-            probability = smooth(model.predict_proba(valid[features])[:, 1], valid)
-            for threshold in np.arange(0.2, 0.81, 0.05):
-                metrics = fault_metrics(valid.is_fault, probability >= threshold, probability)
-                candidates.append((metrics["balanced_accuracy"], setting, float(threshold), metrics))
-        _, setting, threshold, metrics = max(candidates, key=lambda x: x[0])
-        validation[kind] = metrics
-        selection[kind] = {"setting": setting, "threshold": threshold}
-        model = fit_fault(fault_model(kind, setting), train, features)
-        probability = smooth(model.predict_proba(test[features])[:, 1], test)
-        result[f"{kind}_score"] = probability
-        result[f"{kind}_predicted"] = (probability >= threshold).astype(int)
-        if kind == "xgboost":
-            importance = pd.DataFrame({"sensor": [c.replace("m5_", "").removeprefix("d") for c in features * 2],
-                                       "importance": model.steps[-1][1].feature_importances_})
-            importance = importance.groupby("sensor", as_index=False).importance.sum()
-            importance["tag_name"] = importance.sensor.map(TAG_NAMES)
-            importance.sort_values("importance", ascending=False).to_csv(GOLD / "feature_importance.csv", index=False)
-    result.to_csv(GOLD / "fault_predictions.csv", index=False)
-    write_operational_evaluation(result, GOLD)
-    metrics = {kind: fault_metrics(result.is_fault, result[f"{kind}_predicted"],
-                                  result[f"{kind}_score"] if kind != "baseline" else None)
-               for kind in ["baseline", "mlp", "xgboost"]}
-    selected = max(validation, key=lambda k: validation[k]["balanced_accuracy"])
-    return {"selected": selected, "settings": selection, "validation": validation, "test": metrics,
-            "test_rows": len(test), "train_rows": len(train), "fit_rows": len(fit), "validation_rows": len(valid)}
-
-
-def export_features(exports):
-    exports = exports.sort_values("month").copy()
-    date = pd.to_datetime(exports.month)
-    if exports.month.duplicated().any() or not np.array_equal(date.dt.to_period("M").astype(str),
-            pd.period_range(date.min(), date.max(), freq="M").astype(str)):
-        raise ValueError("Exports must have one row per consecutive month")
-    days = date.dt.days_in_month
-    rate = exports.exports_mmcf / days
-    change = rate.pct_change()
-    exports["baseline"] = rate.shift(1) * days
-    exports["target"] = change
-    exports["sin_month"] = np.sin(2 * np.pi * date.dt.month / 12)
-    exports["cos_month"] = np.cos(2 * np.pi * date.dt.month / 12)
-    exports["last_change"] = change.shift(1)
-    exports["recent_change"] = change.shift(1).rolling(3).mean()
-    exports["year_change"] = rate.shift(1) / rate.shift(13) - 1
-    # Each row's seasonal estimate uses only earlier years, including during fitting.
-    exports["seasonal_change"] = change.groupby(date.dt.month).transform(
-        lambda x: x.shift(1).expanding(min_periods=2).median())
-    return exports, ["sin_month", "cos_month", "last_change", "recent_change", "year_change", "seasonal_change"]
-
-
-def export_model(kind, setting):
-    if kind == "mlp":
-        return make_pipeline(StandardScaler(), MLPRegressor(hidden_layer_sizes=(8,),
-            solver="lbfgs", alpha=setting, max_iter=1000, random_state=42))
-    return XGBRegressor(n_estimators=setting, max_depth=2, learning_rate=0.025,
-        min_child_weight=6, reg_lambda=20, base_score=0.0, n_jobs=2, random_state=42)
-
-
-def predict_export(frame, features, i, kind, setting):
-    history = frame.iloc[:i].loc[lambda x: x.month >= "2019-01"].dropna(subset=features + ["target"])
-    model = export_model(kind, setting)
-    model.fit(history[features], history.target)
-    change = model.predict(frame.iloc[[i]][features])[0]
-    return max(0.0, float(frame.iloc[i].baseline * (1 + change)))
-
-
-def forecast_exports():
-    frame, features = export_features(pd.read_csv(SILVER / "exports.csv"))
-    start = len(frame) - TEST_MONTHS
-    if start - VALID_MONTHS < 36:
-        raise ValueError("At least 72 monthly observations are required")
-    validation = {"baseline": float((frame.iloc[start-VALID_MONTHS:start].baseline -
-                                    frame.iloc[start-VALID_MONTHS:start].exports_mmcf).abs().mean() / 1000)}
-    settings = {}
-    for kind, candidates in [("mlp", [1.0, 10.0, 100.0]), ("xgboost", [40, 100, 200])]:
-        errors = {}
-        for setting in candidates:
-            predictions = [predict_export(frame, features, i, kind, setting) for i in range(start-VALID_MONTHS, start)]
-            errors[setting] = float(np.mean(np.abs(np.array(predictions) - frame.iloc[start-VALID_MONTHS:start].exports_mmcf)) / 1000)
-        settings[kind] = min(errors, key=errors.get)
-        validation[kind] = errors[settings[kind]]
-    selected = min(validation, key=validation.get)
-    result = frame.iloc[start:][["month", "exports_mmcf", "baseline"]].rename(columns={"exports_mmcf": "actual"}).copy()
-    for kind, setting in settings.items():
-        result[kind] = [predict_export(frame, features, i, kind, setting) for i in range(start, len(frame))]
-    result.to_csv(GOLD / "volume_forecast.csv", index=False)
-    metrics = {kind: {"mae_bcf": float((result[kind] - result.actual).abs().mean() / 1000),
-                      "mape": float(((result[kind] - result.actual).abs() / result.actual).mean())}
-               for kind in ["baseline", "mlp", "xgboost"]}
-    return {"selected": selected, "settings": settings, "validation_mae_bcf": validation, "test": metrics,
-            "validation_first": frame.iloc[start-VALID_MONTHS].month, "validation_last": frame.iloc[start-1].month,
-            "test_first": result.month.iloc[0], "test_last": result.month.iloc[-1], "test_months": len(result)}
+def split_data(frame):
+    labeled = frame.dropna(subset=["failure_24h"])
+    known = labeled.machineID % 5 != 0  # Deterministic held-out machines, never used to fit or tune.
+    train = labeled[known & (labeled.datetime + pd.Timedelta(hours=24) < VALID_START)]
+    valid = labeled[known & (labeled.datetime >= VALID_START) &
+                    (labeled.datetime + pd.Timedelta(hours=24) < TEST_START)]
+    refit = labeled[known & (labeled.datetime + pd.Timedelta(hours=24) < TEST_START)]
+    test = labeled[labeled.datetime >= TEST_START].copy()
+    test["cohort"] = np.where(test.machineID % 5 == 0, "unseen_machines", "known_machines")
+    return train, valid, refit, test
 
 
 def main():
+    frame = read_parquet(SILVER / "features.parquet")
+    failures = read_parquet(SILVER / "failures.parquet")
+    columns = [c for c in frame if c not in ("machineID", "datetime", "failure_24h", "history_hours")]
+    train, valid, refit, test = split_data(frame)
+    ARTIFACTS.mkdir(parents=True, exist_ok=True)
     GOLD.mkdir(parents=True, exist_ok=True)
+    report = {"target": "Any component failure in the next 24 hours", "features": columns,
+              "train_rows": len(train), "validation_rows": len(valid), "refit_rows": len(refit),
+              "valid_start": str(VALID_START), "test_start": str(TEST_START),
+              "false_alert_budget": FALSE_ALERT_BUDGET, "settings": {}, "validation": {}, "test": {}}
+    all_predictions, all_alerts, all_events, search = [], [], [], []
     with threadpool_limits(limits=2):
-        results = {"faults": classify_faults(), "exports": forecast_exports()}
-    (GOLD / "evaluation.json").write_text(json.dumps(results, indent=2) + "\n")
-    print(json.dumps(results, indent=2))
+        for kind, settings in [("baseline", [0]), ("mlp", [1.0, 10.0]), ("xgboost", [2, 4])]:
+            candidates = []
+            for setting in settings:
+                model = fit_model(kind, setting, train, columns)
+                scored = valid[["machineID", "datetime", "failure_24h"]].copy()
+                scored["score"] = score_model(model, valid, columns)
+                thresholds = [1.5, 2, 2.5, 3, 4, 5] if kind == "baseline" else [0.1, 0.3, 0.5, 0.7, 0.9]
+                for threshold in thresholds:
+                    metrics, _, _ = evaluate(scored, failures, threshold)
+                    candidates.append((selection_key(metrics), setting, threshold, metrics))
+                    search.append({"model": kind, "setting": setting, "threshold": threshold, **metrics})
+            _, setting, threshold, metrics = max(candidates, key=lambda x: x[0])
+            report["settings"][kind] = {"setting": setting, "threshold": threshold}
+            report["validation"][kind] = metrics
+            model = fit_model(kind, setting, refit, columns)
+            bundle = {"model": model, "kind": kind, "features": columns, "threshold": threshold,
+                      "training_end": str(refit.datetime.max())}
+            joblib.dump(bundle, ARTIFACTS / f"{kind}.joblib")
+            scored = test[["machineID", "datetime", "failure_24h", "cohort"]].copy()
+            scored["score"] = score_model(model, test, columns)
+            scored["model"] = kind
+            all_predictions.append(scored)
+            report["test"][kind] = {}
+            for cohort, group in scored.groupby("cohort"):
+                metric, alerts, events = evaluate(group, failures, threshold)
+                report["test"][kind][cohort] = metric
+                all_alerts.append(alerts.assign(model=kind, cohort=cohort))
+                all_events.append(events.assign(model=kind, cohort=cohort))
+            print(f"Evaluated {kind}; validation event recall {metrics['event_recall']:.1%}", flush=True)
+            if kind == "xgboost":
+                pd.DataFrame({"feature": columns, "importance": model.feature_importances_}).sort_values(
+                    "importance", ascending=False).to_csv(GOLD / "maintenance_importance.csv", index=False)
+    report["selected"] = max(MODELS, key=lambda k: selection_key(report["validation"][k]))
+    report["validation_budget_met"] = report["validation"][report["selected"]]["false_alerts_per_100_machine_days"] <= FALSE_ALERT_BUDGET
+    write_parquet(pd.concat(all_predictions, ignore_index=True), GOLD / "maintenance_predictions.parquet")
+    pd.concat(all_alerts, ignore_index=True).to_csv(GOLD / "maintenance_alerts.csv", index=False)
+    pd.concat(all_events, ignore_index=True).to_csv(GOLD / "maintenance_events.csv", index=False)
+    pd.DataFrame(search).to_csv(GOLD / "validation_search.csv", index=False)
+    write_json(GOLD / "maintenance_evaluation.json", report)
+    versions = {"python": platform.python_version(), "sklearn": sklearn.__version__, "xgboost": xgboost.__version__}
+    source_hashes = {p: file_hash(ROOT / p) for p in ["model.py", "prepare.py", "evaluation.py", "sql/features.sql"]}
+    write_json(ARTIFACTS / "registry.json", {"selected": report["selected"], "versions": versions,
+        "source_hashes": source_hashes, "inputs": json.loads((RAW / "manifest.json").read_text()),
+        "model_hashes": {kind: file_hash(ARTIFACTS / f"{kind}.joblib") for kind in MODELS},
+        "settings": report["settings"], "test_start": str(TEST_START), "features": columns})
+    print(json.dumps(report, indent=2))
 
 
 if __name__ == "__main__":
+    from model import main
     main()
