@@ -1,0 +1,49 @@
+<div class="eyebrow">Exports</div>
+<h1>Where Venture Global's LNG goes.</h1>
+<p class="intro">Monthly shipments and destinations for both terminals, and an estimate for the first month after the data ends.</p>
+<div class="controls">
+  <label>Terminal <select id="terminal"><option value="all">Both terminals</option><option>Calcasieu Pass</option><option>Plaquemines</option></select></label>
+  <label>Period <select id="period"><option value="12">Last 12 reported months</option><option value="24">Last 24 reported months</option><option value="all" selected>Full history</option></select></label>
+</div>
+
+<section class="card">
+  <h2>How much was exported each month?</h2>
+  <div class="answer" id="trend-answer"></div>
+  <div id="trend" class="chart" role="img" aria-label="Monthly exports"></div>
+  <p class="legend-note">Amber bars (Calcasieu Pass only): months more than 25% below the preceding six-month average — prompts for review, not evidence of a failure.</p>
+</section>
+
+<div class="columns">
+  <section class="card">
+    <h2>Which countries received it?</h2>
+    <div id="countries" class="chart" role="img" aria-label="Top destination countries"></div>
+  </section>
+  <section class="card">
+    <h2>How has the regional mix shifted?</h2>
+    <div id="regions" class="chart" role="img" aria-label="Share of exports by region over time"></div>
+  </section>
+</div>
+
+<div class="columns wide-left">
+  <section class="card">
+    <div class="eyebrow">Check the track record</div>
+    <h2>How close were past Calcasieu Pass estimates?</h2>
+    <p id="test-caption"></p>
+    <div id="backtest" class="chart" role="img" aria-label="Actual and estimated exports in test months"></div>
+    <p class="limits"><strong>Limits.</strong> Each month is estimated from the preceding reported months. The backtest does not reproduce DOE publication delays or earlier data vintages, so it is a planning benchmark, not proof of live performance. Plaquemines is still ramping up and has too little stable history for the same test.</p>
+  </section>
+  <section class="card">
+    <div class="eyebrow">Next unreported month · Calcasieu Pass</div>
+    <h2 id="target"></h2>
+    <p id="estimate" style="font-size:44px;font-weight:650;color:#156858;letter-spacing:-2px;margin:10px 0 0"></p>
+    <p id="range"></p>
+    <p id="method"></p>
+    <p id="coverage"></p>
+    <div class="notice"><span>This estimates the month after the dataset ends, not the current calendar month. The range aims to contain about 8 in 10 outcomes.</span></div>
+  </section>
+</div>
+
+<details class="card"><summary>Download the numbers</summary>
+  <p>A cargo can appear in several DOE allocation rows (split sales). Volumes add every allocation; cargoes count distinct vessel + date + terminal.</p>
+  <nav class="downloads"><a href="data/monthly_exports.csv" download>Monthly totals ↓</a><a href="data/cargoes.csv" download>Cargoes ↓</a><a href="data/allocations.csv" download>DOE allocations ↓</a><a href="data/export_backtest.csv" download>Past estimates ↓</a><a href="docs/exports.md">Methodology</a></nav>
+</details>

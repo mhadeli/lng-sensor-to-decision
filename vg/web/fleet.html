@@ -1,0 +1,45 @@
+<div class="eyebrow">Fleet &amp; shipping</div>
+<h1>How the ships move.</h1>
+<p class="intro">Which ships carry Venture Global's cargoes, how long they take to come back, which routes they appear to use, how long they spend at the berth, and what weather does to their speed.</p>
+<div class="notice"><span><strong>Two data sources.</strong> DOE vessel records cover every cargo from both terminals, 2022–2026. Ship positions (AIS, NOAA MarineCadastre) are public only through 2023, so the berth and weather analysis covers Calcasieu Pass in October 2023 — before Plaquemines and before Venture Global's own ships were delivered.</span></div>
+
+<section class="card question">
+  <h2>How much is carried by Venture Global's own ships?</h2>
+  <div class="answer" id="share-answer"></div>
+  <div id="share" class="chart short" role="img" aria-label="Share of cargoes on Venture Global's own ships"></div>
+  <details><summary style="font-size:14px;cursor:pointer">Most frequent ships</summary><div id="ships"></div></details>
+  <p class="limits"><strong>Definition.</strong> Own ships are the seven <em>Venture</em>-named tankers in the DOE data, consistent with the 10-K (nine contracted, seven delivered by end-2025). Chartered ships carrying Venture Global's cargoes count as third-party here.</p>
+</section>
+
+<section class="card question">
+  <h2>How long until a ship loads again, and which routes do Asia voyages take?</h2>
+  <div class="answer" id="trip-answer"></div>
+  <div class="columns">
+    <div id="trips" class="chart" role="img" aria-label="Round-trip days by destination region"></div>
+    <div id="routes" class="chart" role="img" aria-label="Inferred route of Asia voyages by quarter"></div>
+  </div>
+  <p class="limits"><strong>Method.</strong> A round trip runs from a Venture Global loading to the same ship's next loading at any U.S. terminal (gaps over 150 days are excluded as other trading). For Asia voyages the implied average speed is computed for each route; a route is plausible when it implies 13–20 knots, and the voyage is labeled only when exactly one route fits. <strong>Limits.</strong> Waiting time, slow steaming and calls at other ports all lengthen trips, so this infers routes, it does not observe them.</p>
+</section>
+
+<section class="card question">
+  <h2>How long do ships wait and berth at Calcasieu Pass? (AIS, October 2023)</h2>
+  <div class="answer" id="calls-answer"></div>
+  <div id="calls-chart" class="chart short" role="img" aria-label="Waiting and berth hours per port call"></div>
+  <div id="calls"></div>
+  <p class="limits"><strong>Method.</strong> A berth stay is at least 6 hours within 1 km of the berths at under 1 knot. Waiting is time stopped within 60 km before berthing. Each stay is matched to a DOE departure by ship name within a day; when the AIS name differs (renamed or abbreviated ship), the only unmatched DOE cargo that day is used and labeled.</p>
+</section>
+
+<section class="card question">
+  <h2>Do waves and wind slow the ships down?</h2>
+  <div class="answer" id="speed-answer"></div>
+  <div id="speed" class="chart short" role="img" aria-label="Average speed by wave height, laden and ballast"></div>
+  <p class="limits"><strong>Method.</strong> Open-water positions (over 80 km from the terminal, above 6 knots) within six days of a berth stay, joined to hourly modeled wave height and wind on a 1° grid (Open-Meteo). Ship fixed effects; standard errors clustered by ship. <strong>Limits.</strong> One calm month and a dozen ships. Speed is mostly a commercial choice, so a small or zero effect is unsurprising; a full year of AIS would be needed to measure storm effects or fuel burn, which is not public.</p>
+</section>
+
+<section class="card question">
+  <h2>What does the voyage cost per MMBtu?</h2>
+  <div class="answer">Shipping is the swing factor in netbacks: at the base case Rotterdam costs about <strong id="cost-eu"></strong> per MMBtu and Tokyo via Panama <strong id="cost-asia"></strong>, rising sharply when Panama is unavailable or charter rates spike.</div>
+  <div id="costs"></div>
+  <p class="limits">Low case uses low charter rates and fees with the highest speed; high case the reverse. Assumptions are listed on the commercial page.</p>
+</section>
+<details class="card"><summary>Download the numbers</summary><nav class="downloads"><a href="data/round_trips.csv" download>Round trips ↓</a><a href="data/port_calls.csv" download>AIS port calls ↓</a><a href="docs/fleet.md">Methodology</a></nav></details>

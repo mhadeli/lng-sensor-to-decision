@@ -1,0 +1,24 @@
+<div class="eyebrow">Venture Global LNG · Calcasieu Pass and Plaquemines, Louisiana</div>
+<h1>How Venture Global's LNG business performs, from public data.</h1>
+<p class="intro">One company, two operating terminals, and the questions a data science team would ask about production, reliability, trading and shipping. Each answer below is computed from pinned public sources and states its limits.</p>
+<div class="notice"><strong id="cutoff"></strong><span>DOE reports exports monthly with a lag, so this is a historical view, not live tracking. Numbers marked as estimates depend on stated assumptions.</span></div>
+<section class="metrics" aria-label="Latest reported month">
+  <article><div class="label">Company exports, latest month</div><strong id="total"></strong><p id="total-change"></p></article>
+  <article><div class="label">Cargoes, latest month</div><strong id="cargoes"></strong><p>Distinct vessel departures</p></article>
+  <article><div class="label">Calcasieu Pass vs nameplate</div><strong id="util-cp"></strong><p>10.0 MTPA nameplate</p></article>
+  <article><div class="label">Plaquemines vs nameplate</div><strong id="util-pq"></strong><p>20.0 MTPA nameplate</p></article>
+</section>
+<section class="card">
+  <div class="eyebrow">Exports by terminal</div>
+  <h2>Monthly LNG exports since the first cargo</h2>
+  <div id="overview-chart" class="chart" role="img" aria-label="Monthly exports by terminal, stacked"></div>
+  <p class="legend-note">Bcf = billion cubic feet of natural gas equivalent. Source: DOE LNG export workbook, all allocations from both terminals.</p>
+</section>
+<div class="cards">
+  <a class="card" href="exports.html"><div class="eyebrow">Exports</div><h3>Where does the LNG go, and what comes next month?</h3><p id="h-exports"></p><span class="go">Open exports →</span></a>
+  <a class="card" href="production.html"><div class="eyebrow">Production</div><h3>How close to capacity, and does heat cut output?</h3><p id="h-production"></p><span class="go">Open production →</span></a>
+  <a class="card" href="reliability.html"><div class="eyebrow">Reliability</div><h3>When did output drop, and was weather the cause?</h3><p id="h-reliability"></p><span class="go">Open reliability →</span></a>
+  <a class="card" href="commercial.html"><div class="eyebrow">Commercial</div><h3>Do cargoes follow the best netback, and can feed-gas prices be forecast?</h3><p id="h-commercial"></p><span class="go">Open commercial →</span></a>
+  <a class="card" href="fleet.html"><div class="eyebrow">Fleet</div><h3>How do ships cycle, which routes do they take, and how long do they berth?</h3><p id="h-fleet"></p><span class="go">Open fleet →</span></a>
+  <a class="card" href="data.html"><div class="eyebrow">Data platform</div><h3>Can the numbers be trusted?</h3><p id="h-data"></p><span class="go">Open data &amp; methods →</span></a>
+</div>

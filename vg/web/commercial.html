@@ -1,0 +1,40 @@
+<div class="eyebrow">Commercial</div>
+<h1>Where a cargo earns the most, and what feed gas will cost.</h1>
+<p class="intro">A U.S. LNG seller compares what each market pays after shipping, boil-off and regasification. This page models those netbacks, checks them against where Venture Global's cargoes actually went and what it reported earning, and tests how well the Henry Hub feed-gas price can be forecast.</p>
+<div class="notice"><span><strong>Price proxies.</strong> Europe uses the IMF/FRED EU natural gas price (TTF-linked). Asia uses the Japan LNG import price, which is mostly oil-linked contracts — spot JKM is paid data and is not used. Both are monthly averages. Shipping inputs are assumptions with stated ranges, listed at the bottom.</span></div>
+
+<section class="card question">
+  <h2>Which market paid more after shipping costs?</h2>
+  <div class="answer" id="netback-answer"></div>
+  <div id="netbacks" class="chart" role="img" aria-label="Modeled FOB netbacks for Europe and Asia"></div>
+  <div id="probability" class="chart short" role="img" aria-label="Probability that Europe beats Asia"></div>
+  <p class="limits"><strong>Method.</strong> FOB netback at Calcasieu Pass = delivered price × (1 − boil-off) − charter and canal costs − regasification, for a 3.6 Bcf cargo to Rotterdam or Tokyo. Sea distances come from the open-source <code>searoute</code> network. The probability panel repeats the calculation 4,000 times per month with every assumption drawn from its low–base–high range.</p>
+</section>
+
+<section class="card question">
+  <h2>Did cargoes go where the netback was better?</h2>
+  <div class="answer" id="choice-answer"></div>
+  <div id="choice" class="chart" role="img" aria-label="Modeled Europe advantage against share of cargoes sent to Europe"></div>
+  <p class="limits"><strong>Limits.</strong> Only Europe-versus-Asia volume is compared. Long-term contracts, buyer destination rights and the Asia price proxy all weaken the link, so a moderate correlation is the expected ceiling, not a disappointing result.</p>
+</section>
+
+<section class="card question">
+  <h2>How do reported prices compare with the model?</h2>
+  <div class="answer" id="realized-answer"></div>
+  <div id="realized" class="chart" role="img" aria-label="Realized price per MMBtu from SEC filings against modeled netback"></div>
+  <p class="limits"><strong>Source.</strong> Weighted average price of LNG sold per project and quarter, from Venture Global's 10-Q and 10-K filings (Q4 derived from annual totals). Modeled netback is volume-weighted over each quarter's actual Europe and Asia cargoes. Realized prices include intercompany sales to VG Commodities and mix of FOB and delivered sales.</p>
+</section>
+
+<section class="card question">
+  <h2>Can the Henry Hub feed-gas price be forecast weeks ahead?</h2>
+  <div class="answer" id="hh-answer"></div>
+  <div id="hh" class="chart" role="img" aria-label="Weekly Henry Hub price with 4-week-ahead forecasts"></div>
+  <div class="columns">
+    <div><h3>Test error, January 2022 onward</h3><div id="hh-metrics"></div></div>
+    <div><h3>Outlook from the latest week</h3><div id="hh-outlook"></div><p class="legend-note">Point forecasts only. With no model reliably beating "no change", treat these as a sanity check, not a trading signal.</p></div>
+  </div>
+  <p class="limits"><strong>Method.</strong> Weekly averages of the EIA daily price; log-price changes 1, 4 and 8 weeks ahead. Each test year is predicted by models refit only on data whose targets were known before 1 January. The Conv1D + LSTM reads the last 52 weekly changes plus a seasonal cycle, is an average of 5 seeds, and uses early stopping on the latest 15% of its training period. The Diebold–Mariano test compares each model's absolute errors with the naive forecast.</p>
+</section>
+
+<details class="card"><summary>Shipping assumptions</summary><div id="assumptions"></div></details>
+<details class="card"><summary>Download the numbers</summary><nav class="downloads"><a href="data/netbacks.csv" download>Monthly netbacks ↓</a><a href="data/realized_vs_modeled.csv" download>Realized vs modeled ↓</a><a href="data/henry_hub_forecasts.csv" download>Henry Hub forecasts ↓</a><a href="docs/commercial.md">Methodology</a></nav></details>

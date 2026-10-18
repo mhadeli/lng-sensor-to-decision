@@ -1,0 +1,29 @@
+<div class="eyebrow">Production</div>
+<h1>How hard the plants run.</h1>
+<p class="intro">Export pace compared with each terminal's nameplate capacity, how fast each one ramped up, and whether hot weather lowers output.</p>
+<div class="notice"><span>Exports are used as a stand-in for production: LNG is shipped within days of being made, so monthly exports track output closely. Capacity figures come from Venture Global's 2025 10-K; 1 MTPA ≈ 48 Bcf a year.</span></div>
+
+<section class="card question">
+  <h2>How close does each terminal run to nameplate capacity?</h2>
+  <div class="answer" id="util-answer"></div>
+  <div id="util" class="chart" role="img" aria-label="Monthly utilization of nameplate capacity"></div>
+  <p class="limits"><strong>Limits.</strong> Nameplate is the vendor-guaranteed minimum; Venture Global states its plants can produce more under good conditions, and sells that excess separately. Above 100% is therefore expected, not an error. The dashed lines show the FERC/DOE authorized capacity.</p>
+</section>
+
+<section class="card question">
+  <h2>How fast did each terminal ramp up?</h2>
+  <div class="answer" id="ramp-answer"></div>
+  <div id="ramp" class="chart" role="img" aria-label="Utilization by months since first cargo"></div>
+  <p class="limits"><strong>Limits.</strong> Three-month rolling average. Commissioning cargoes are included because they are real output; commercial operation (COD) is a contractual milestone, not the start of production.</p>
+</section>
+
+<section class="card question">
+  <h2>Does hot weather reduce output at Calcasieu Pass?</h2>
+  <div class="answer" id="heat-answer"></div>
+  <div class="columns wide-left">
+    <div id="heat" class="chart" role="img" aria-label="Monthly export pace against mean temperature"></div>
+    <div id="heat-table"></div>
+  </div>
+  <p class="limits"><strong>Method.</strong> Monthly export pace (Bcf/d) regressed on mean air temperature at the site, with a linear trend and a shift after commercial operation, from October 2022 (ramp-up complete). Standard errors allow for autocorrelation (Newey–West, 3 lags). <strong>Limits.</strong> Planned maintenance is often scheduled in mild seasons and hurricanes arrive in summer, so the estimate can absorb other seasonal effects; the second row drops months with detected low-output windows to check this. Plaquemines is still ramping up, which would swamp any weather signal, so it is not estimated.</p>
+</section>
+<details class="card"><summary>Download the numbers</summary><nav class="downloads"><a href="data/utilization.csv" download>Monthly utilization ↓</a><a href="docs/production.md">Methodology</a></nav></details>

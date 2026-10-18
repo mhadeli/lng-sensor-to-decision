@@ -1,0 +1,41 @@
+<div class="eyebrow">Data platform &amp; methods</div>
+<h1>Can these numbers be trusted?</h1>
+<p class="intro">Every figure on this site comes from pinned public files, passes explicit data contracts, and is cross-checked against an independent source where one exists. This page shows how.</p>
+
+<section class="card">
+  <h2>How data flows</h2>
+  <div class="answer" id="lineage-answer"></div>
+  <div class="columns" style="grid-template-columns:repeat(4,minmax(0,1fr))" id="layers"></div>
+  <p class="limits">Local medallion architecture: Python, DuckDB and Parquet, no cloud services. Bronze snapshots are committed with SHA-256 checksums, so every build reproduces the same numbers; accepting new upstream data is an explicit, reviewed step (<code>python -m vg.bronze --refresh</code>). The same layout maps directly to Azure Data Lake + Databricks (bronze/silver/gold Delta tables).</p>
+</section>
+
+<section class="card question">
+  <h2>Do DOE export records agree with what Venture Global reports to investors?</h2>
+  <div class="answer" id="recon-answer"></div>
+  <div id="recon" class="chart short" role="img" aria-label="Difference between DOE and SEC volumes by quarter"></div>
+  <div id="recon-table"></div>
+  <p class="limits"><strong>Method.</strong> DOE volumes (Bcf) are converted at 1,038 Btu per cubic foot and compared with "LNG volumes exported" (or sold, when exported is not reported) in each 10-Q/10-K; Q4 is the annual total minus Q1–Q3. A consistent 1–2% gap in one direction per terminal points to a heating-value or measurement convention, not missing cargoes — cargo counts match.</p>
+</section>
+
+<section class="card question">
+  <h2>Which checks ran on this build?</h2>
+  <div class="answer" id="quality-answer"></div>
+  <div id="quality"></div>
+</section>
+
+<section class="card">
+  <h2>Sources</h2>
+  <div id="sources"></div>
+</section>
+
+<section class="card">
+  <h2>Curated events</h2>
+  <p>Dated milestones and filings used as context for the reliability page. Each row cites its source and lives in <code>reference/events.csv</code> for review.</p>
+  <div id="events"></div>
+</section>
+
+<section class="card">
+  <h2>Methodology documents</h2>
+  <nav class="downloads"><a href="docs/data_platform.md">Data platform</a><a href="docs/exports.md">Exports</a><a href="docs/production.md">Production</a><a href="docs/reliability.md">Reliability</a><a href="docs/commercial.md">Commercial</a><a href="docs/fleet.md">Fleet</a><a href="data/data_quality.csv" download>Quality report ↓</a><a href="data/doe_sec_reconciliation.csv" download>Reconciliation ↓</a></nav>
+  <h3>Build timings</h3><div id="timings"></div>
+</section>

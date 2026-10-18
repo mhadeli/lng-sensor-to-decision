@@ -1,0 +1,185 @@
+{
+  "built_at": "2026-10-18T03:39:56.430368+00:00",
+  "resample": "10min",
+  "filters": {
+    "gulf_box": {
+      "lat": [
+        17.0,
+        31.0
+      ],
+      "lon": [
+        -98.0,
+        -80.0
+      ]
+    },
+    "calcasieu_box": {
+      "lat": [
+        29.3,
+        29.85
+      ],
+      "lon": [
+        -93.6,
+        -93.0
+      ]
+    },
+    "doe_vessel_names": 298
+  },
+  "rows": 50372,
+  "upstream": [
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_01.zip",
+      "sha256": "c642df55661de23774e3b6502271af500d1a3470cb647d7860c617eaa9afe043",
+      "bytes": 311061184
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_02.zip",
+      "sha256": "8b3fd50d6043c73c50e5c4b4d57d43c45bd5871083e23cb0c0edcf2040bb0be8",
+      "bytes": 331904294
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_03.zip",
+      "sha256": "3a47becb71d4fa4a2aee4bb33584e00707cd86f599b6797caac6c1a221bce623",
+      "bytes": 317520242
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_04.zip",
+      "sha256": "cd2ea045ee0492fbc6a50fe5931a41a9f3bc8c6ccdb6b310fd4ff1cba1b27c6d",
+      "bytes": 306564733
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_05.zip",
+      "sha256": "ebead40d0fd8d03d9ceccb01cea87cfccc580ff22fe2a59fa2b2bc87b960680e",
+      "bytes": 324202088
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_06.zip",
+      "sha256": "946ad94f4c111a2158b0dce448da9a3ac85cbfd56819210ebe6dd03aaf6022ee",
+      "bytes": 342387460
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_07.zip",
+      "sha256": "6e6c79067d09a4f6a0671f4ed26d28cb4940ac2a08b18bb5f5eb86ebe60e6383",
+      "bytes": 322224140
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_08.zip",
+      "sha256": "4f56182b41c0b1721c02c47f5213c674a1b085cb82f2bbd697a96731a6b0ac40",
+      "bytes": 322822443
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_09.zip",
+      "sha256": "194b7456f8cdd6d0bcee73595db243a001f94e3d56c4fbba691828f1d323aa18",
+      "bytes": 324607306
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_10.zip",
+      "sha256": "c487990711ad22adb3adabbd4f584902ea0effdc8d8b227c1b2b19ef0563977d",
+      "bytes": 330992427
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_11.zip",
+      "sha256": "04533305824912e38a932ca9bd83c99ca83a0e27d94d53e6c57ef45771d36cde",
+      "bytes": 336275684
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_12.zip",
+      "sha256": "4f0b0636b9372394485bf8994a5936aa7f735a6a3ba82222a1d3adbf43fd4456",
+      "bytes": 331917686
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_13.zip",
+      "sha256": "f7fef0a3ffd6e3d175bf34493adc87e9bfaa7350ad7c198b625fe266268af4af",
+      "bytes": 331555438
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_14.zip",
+      "sha256": "160523808b5980a29a7db2459f6132e86dff7a4994fbf03844051f5d5e5a676f",
+      "bytes": 327209676
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_15.zip",
+      "sha256": "5a6bb26a9ea2c1bc57ad292f3c16cf3538aa81a9001708e15c6afabe4a74dbf6",
+      "bytes": 306601593
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_16.zip",
+      "sha256": "2fb1f3bbd82e12015940867c84594e57822acb9cd661d165f92fbd0ec1438624",
+      "bytes": 309621923
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_17.zip",
+      "sha256": "34b02a9450f59ab9421d38e697fe47b5bc9a0c523438060522e9c949a3d64108",
+      "bytes": 318537707
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_18.zip",
+      "sha256": "ce08889001da66e6c0d959e99b544438bdd2ab27d78fcd85a96870fbd75703de",
+      "bytes": 331033399
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_19.zip",
+      "sha256": "e32440df11510225db17272267aa2d2606adc3a9f6a698edbd39a2fa06df66b9",
+      "bytes": 329002677
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_20.zip",
+      "sha256": "fb58661763819ddef5df38a3a9b5fce44613ed6bc9180448a1007951ac4601f9",
+      "bytes": 299770668
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_21.zip",
+      "sha256": "316368f3c7e201b3f255105b1ae9e313f3361f0e55a7017ac1d6d76b9ad29fd2",
+      "bytes": 270045270
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_22.zip",
+      "sha256": "d7366ae8e646f7bbc2fb500fc5704048bafc73aaae9ac5ee062ab17bce458077",
+      "bytes": 320231788
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_23.zip",
+      "sha256": "48c655b179e9bfa204d03713a039eea60a9fed51486f699a498fb26e86bf2a0b",
+      "bytes": 313391623
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_24.zip",
+      "sha256": "cc0404f73a974bde1cc8afd7c340c0c0c354f0e5f6c788ab0003f97065d181fb",
+      "bytes": 327543250
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_25.zip",
+      "sha256": "7bc1fb93fc285f4fb7000e494fbd3d3b2ec0ae4c04cd7d06039835906b93daa6",
+      "bytes": 330734895
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_26.zip",
+      "sha256": "7088c6317c25b28ff0c0734f5312b2263c3c18f7e51409ae77f632cc19d9ae32",
+      "bytes": 326220959
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_27.zip",
+      "sha256": "4a362ecc895a75446c6fa2255890a175c78f7272b0d76475709cd4326bfa86dd",
+      "bytes": 340769125
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_28.zip",
+      "sha256": "d5cd941a2dc87325c3f9bc3f141e35ab15253cd3f839973467f4c94d6b886bac",
+      "bytes": 320065509
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_29.zip",
+      "sha256": "2bed63405b4a1fb96358c67d554c55686bebd7ef13e2544b966bb4ae5ba1168d",
+      "bytes": 177872671
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_30.zip",
+      "sha256": "74aabf05809b48cc8494fc21e61ae6cb50f3c1e665a979ebc5e7f1260ece2267",
+      "bytes": 308933869
+    },
+    {
+      "url": "https://coast.noaa.gov/htdata/CMSP/AISDataHandler/2023/AIS_2023_10_31.zip",
+      "sha256": "84c0182a2593b80416dedc5eb632850723ce5997e57c654c29beb84211105b5f",
+      "bytes": 313173255
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+date,precision,terminal,category,title,source_name,source_url
+2022-01-19,day,Calcasieu Pass,milestone,First LNG production,Global Energy Monitor,https://www.gem.wiki/Calcasieu_Pass_LNG_Terminal
+2022-03-01,day,Calcasieu Pass,milestone,First export cargo reported to DOE,DOE LNG export workbook,https://www.energy.gov/hgeo/articles/natural-gas-imports-and-exports-monthly-2026
+2023-03-28,day,Calcasieu Pass,equipment,"Commissioning update to FERC: heat-recovery steam generator (HRSG) leaks need repairs and replacements",Venture Global IPO prospectus (424B4),https://www.sec.gov/Archives/edgar/data/2007855/000119312525012218/d146310d424b4.htm
+2023-06-29,day,Calcasieu Pass,environmental,"Louisiana DEQ consolidated compliance order AE-CN-22-00367 for permit exceedances",IEEFA (citing LDEQ),https://ieefa.org/sites/default/files/2023-10/Calcasieu%20Pass%20LNG%20Unreliable%20Operations%20Excessive%20Pollution%20and%20Profits_October%202023.pdf
+2023-10-12,day,Calcasieu Pass,equipment,FERC authorizes the HRSG remediation plan,Venture Global IPO prospectus (424B4),https://www.sec.gov/Archives/edgar/data/2007855/000119312525012218/d146310d424b4.htm
+2023-10-26,day,Calcasieu Pass,milestone,FERC authorizes the last liquefaction blocks to enter service,Venture Global IPO prospectus (424B4),https://www.sec.gov/Archives/edgar/data/2007855/000119312525012218/d146310d424b4.htm
+2024-02-01,month,Calcasieu Pass,equipment,"FERC construction and commissioning inspection, including HRSG repair work",Venture Global IPO prospectus (424B4),https://www.sec.gov/Archives/edgar/data/2007855/000119312525012218/d146310d424b4.htm
+2024-12-26,day,Plaquemines,milestone,First export cargo reported to DOE,DOE LNG export workbook,https://www.energy.gov/hgeo/articles/natural-gas-imports-and-exports-monthly-2026
+2025-04-15,day,Calcasieu Pass,milestone,Commercial operations date (COD) after HRSG and gas pre-treatment remediation,Venture Global 10-K 2025,https://www.sec.gov/Archives/edgar/data/2007855/000200785526000013/vg-20251231.htm

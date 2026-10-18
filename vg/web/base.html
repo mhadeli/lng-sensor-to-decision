@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{title}} · Venture Global LNG analytics</title>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/plotly.min.js"></script>
+</head>
+<body>
+<header class="site-header">
+  <a href="index.html" class="brand">VG <span>LNG ANALYTICS</span></a>
+  <nav aria-label="Pages">{{nav}}</nav>
+  <span class="badge">Public data · research project</span>
+</header>
+<main>
+{{content}}
+<footer>
+  <span>Independent portfolio project using public data. Not affiliated with or endorsed by Venture Global.</span>
+  <span>Data through <strong id="footer-cutoff"></strong> · Built <span id="footer-built"></span> · <a href="data.html">Sources &amp; quality</a></span>
+</footer>
+</main>
+<script id="page-data" type="application/json">{{data}}</script>
+<script src="assets/common.js"></script>
+<script src="assets/{{script}}"></script>
+</body>
+</html>

@@ -1,28 +1,34 @@
-"""Build the Calcasieu Pass export dashboard from one public DOE workbook."""
+"""Build the Venture Global LNG analytics site from pinned public data.
+
+    python pipeline.py
+
+Steps: unit tests → verify bronze checksums → silver tables → gold analyses → static site in site/.
+To accept newer upstream data, run `python -m vg.bronze --refresh` first and review the manifest diff.
+"""
 import argparse
 import subprocess
 import sys
+from datetime import datetime, timezone
+from time import perf_counter
 
-from common import ROOT, write_json
-from lng.data import OUTPUT, prepare
-from lng.forecast import analyze
-from lng.dashboard import render
-
-
-def main(offline=False):
-    print('Reading and validating the DOE workbook...', flush=True)
-    transactions, monthly, source = prepare(offline)
-    print('Comparing simple forecasts using chronological holdouts...', flush=True)
-    forecast, backtest, monthly = analyze(monthly)
-    monthly.to_csv(OUTPUT / 'monthly_exports.csv', index=False)
-    backtest.to_csv(OUTPUT / 'backtest.csv', index=False)
-    write_json(OUTPUT / 'forecast.json', forecast)
-    subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_lng.py', '-v'], cwd=ROOT, check=True)
-    render(transactions, monthly, forecast, backtest, source)
-    print(f"Complete. Open {ROOT / 'site' / 'index.html'}")
+from vg import gold, site
+from vg.common import GOLD, ROOT, SITE, file_hash, write_json
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--offline', action='store_true', help='Require the cached, checksum-verified workbook')
-    main(parser.parse_args().offline)
+def main():
+    timings, start = [], perf_counter()
+    print("Running unit tests...", flush=True)
+    subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tests"], cwd=ROOT, check=True)
+    print("Building bronze → silver → gold...", flush=True)
+    payloads, downloads = gold.build(timings)
+    print("Rendering site...", flush=True)
+    site.render(payloads, downloads)
+    write_json(GOLD / "run.json", {
+        "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "seconds": round(perf_counter() - start, 1),
+        "steps": timings, "code": {str(p.relative_to(ROOT)): file_hash(p) for p in sorted((ROOT / "vg").glob("*.py"))}})
+    print(f"Complete in {perf_counter() - start:.0f}s. Open {SITE / 'index.html'}")
+
+
+if __name__ == "__main__":
+    argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter).parse_args()
+    main()

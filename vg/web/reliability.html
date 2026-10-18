@@ -1,0 +1,22 @@
+<div class="eyebrow">Reliability</div>
+<h1>When output dropped, and why.</h1>
+<p class="intro">Without plant sensor data, the cargo schedule is the best public signal of downtime: when a plant slows, ships stop leaving. This page finds those periods and checks them against weather and documented events.</p>
+<div class="notice"><span><strong>There is no public outage log for either terminal.</strong> Detections are compared with hurricane tracks, NOAA storm reports, reanalysis weather and curated filings. A window with no match is listed for investigation — it is not counted as a false alarm, and a match is not proof of cause.</span></div>
+
+<section class="card question">
+  <h2>When did output fall below its normal pace?</h2>
+  <div class="answer" id="detect-answer"></div>
+  <div class="controls"><label>Terminal <select id="terminal"><option>Calcasieu Pass</option><option>Plaquemines</option></select></label></div>
+  <div id="pace" class="chart tall" role="img" aria-label="30-day export pace with detected low-output windows shaded"></div>
+  <p class="legend-note">Shaded: detected low-output windows. Triangles: weather hazards. Diamonds: documented events (filings, permits, milestones).</p>
+  <div id="windows-table"></div>
+  <p class="limits"><strong>Detectors.</strong> <span id="settings"></span> The first <span id="warmup"></span> days after a terminal's first cargo are skipped as start-up.</p>
+</section>
+
+<section class="card question">
+  <h2>Was weather behind the drops?</h2>
+  <div class="answer" id="weather-answer"></div>
+  <div id="hazards-table"></div>
+  <p class="limits"><strong>Matching rule.</strong> A window is weather-matched when a hazard is active from 3 days before to 10 days after the window begins, so long windows get no credit for coincidences late in the window. The chance rate places windows of the same length at random dates and applies the same rule 2,000 times. <strong>Limits.</strong> Five windows is a small sample; NOAA Storm Events misses some regional storms (Winter Storm Elliott, December 2022, appears only in the reanalysis data).</p>
+</section>
+<details class="card"><summary>Download the numbers</summary><nav class="downloads"><a href="data/low_output_windows.csv" download>Low-output windows ↓</a><a href="docs/reliability.md">Methodology</a></nav></details>
